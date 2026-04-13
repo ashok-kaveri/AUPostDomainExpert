@@ -1,0 +1,10 @@
+{
+  "69dc8384b31a33c919e58c75": {
+    "card_name": "MCSL/WSS HS Code Is disappearing while editing the package",
+    "card_url": "https://trello.com/c/35gwbUtF/4071-mcsl-wss-hs-code-is-disappearing-while-editing-the-package",
+    "release": "Ready For QA AI Ashok AU Post",
+    "test_cases": "# Test Cases: MCSL/WSS HS Code Disappearing While Editing Package\n\n### TC-1: HS Code and Description Persist When Generating Label Without Package Edits\n**Type:** Positive\n**Priority:** High\n**Preconditions:** \n- User is logged into the PH AU Post app\n- A Shopify order exists with products that have HS codes and custom descriptions configured\n- The order is ready for shipment label generation\n\n**Steps:**\nGiven I am on the Order Details page in the PH AU Post app\nWhen I navigate to the Shipping L…",
+    "rag_chunks": 0,
+    "approved_at": "2026-04-13 11:20"
+  }
+}
