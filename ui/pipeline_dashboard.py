@@ -1021,7 +1021,7 @@ def main():
                     risk_icon = risk_colors.get(ra.risk_level, "⚪")
                     with st.expander(
                         f"{risk_icon} **Release Intelligence — {ra.risk_level} RISK** · {ra.risk_summary}",
-                        expanded=True,
+                        expanded=False,
                     ):
                         if ra.kb_context_summary:
                             st.info(f"📚 **KB Context:** {ra.kb_context_summary}")
@@ -1085,7 +1085,7 @@ def main():
                     )
                     appr_icon = "✅ " if is_approved else ""
                     done_badge = "⚡ " if already_done and not is_approved else ""
-                    with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=not is_approved):
+                    with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=False):
 
                         # ── Already processed banner ──────────────────────
                         if already_done and not is_approved:
