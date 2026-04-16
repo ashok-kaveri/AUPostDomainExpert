@@ -18,12 +18,13 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SOURCES = ["pluginhive_docs", "pluginhive_seeds", "sheets", "codebase", "wiki"]
+_DEFAULT_SOURCES = ["pluginhive_docs", "pluginhive_seeds", "sheets", "codebase", "wiki", "app"]
 # pluginhive_docs  — Official PluginHive AU Post app setup guide (product docs, UX flows, FAQ)
 # pluginhive_seeds — Seed URL scrape of AU Post knowledge base and guide pages
 # sheets           — eParcel + MyPost Business test cases (Google Sheets)
 # codebase         — Playwright TypeScript automation codebase
 # wiki             — Internal AU Post wiki markdown knowledge base
+# app              — Live AU Post app UI knowledge (inline + manual + browser capture)
 # pluginhive       — Full PluginHive web scrape (excluded by default — large)
 # shopify          — Shopify App Store listing
 
@@ -36,6 +37,7 @@ def run_ingest(sources: list[str] | None = None) -> None:
     from ingest.pdf_loader import load_pdf_test_cases
     from ingest.pluginhive_app_docs import load_pluginhive_app_docs
     from ingest.wiki_loader import load_wiki_docs
+    from ingest.app_navigator import load_app_knowledge
 
     active_sources = sources if sources is not None else _DEFAULT_SOURCES
     start = time.time()
@@ -77,6 +79,10 @@ def run_ingest(sources: list[str] | None = None) -> None:
         logger.info("Loading internal AU Post wiki documentation…")
         all_documents.extend(load_wiki_docs())
 
+    if "app" in active_sources:
+        logger.info("Loading AU Post app UI knowledge (inline + captured content)…")
+        all_documents.extend(load_app_knowledge())
+
     if not all_documents:
         logger.error("No documents loaded. Check your sources and try again.")
         sys.exit(1)
@@ -94,7 +100,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sources",
         nargs="*",
-        choices=["pluginhive", "pluginhive_seeds", "shopify", "pluginhive_docs", "codebase", "sheets", "pdf", "wiki"],
+        choices=["pluginhive", "pluginhive_seeds", "shopify", "pluginhive_docs", "codebase", "sheets", "pdf", "wiki", "app"],
         help="Which sources to ingest (default: all)",
     )
     args = parser.parse_args()

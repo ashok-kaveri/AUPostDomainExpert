@@ -59,6 +59,9 @@ AUTOMATION_CODEBASE_PATH = os.getenv(
     str(BASE_DIR.parent / "aupost-test-automation"),
 )
 
+# AU Post Shopify app slug (used for app URL construction)
+AUPOST_APP_SLUG = os.getenv("AUPOST_APP_SLUG", "australia-post-rates-labels")
+
 # Internal AU Post wiki (markdown knowledge base)
 WIKI_PATH = os.getenv("WIKI_PATH", "")
 
