@@ -912,7 +912,7 @@ def main():
                     list_names,
                     index=default_idx,
                 )
-                selected_list_id = next(lid for name, lid in filtered_lists if name == selected_list_name)
+                selected_list_id = next((lid for name, lid in filtered_lists if name == selected_list_name), "")
 
             with col_load:
                 st.write("")
