@@ -893,7 +893,7 @@ def main():
                 all_lists = _get_board_lists(st.session_state.get("selected_board_id", ""))
 
                 # Filter toggle — show only QA lists or all lists
-                show_all = st.toggle("Show all lists", value=False)
+                show_all = st.toggle("Show all lists", value=True)
                 if show_all:
                     filtered_lists = all_lists
                 else:
@@ -901,6 +901,10 @@ def main():
                         (name, lid) for name, lid in all_lists
                         if "ready for qa" in name.lower() or "qa" in name.lower()
                     ]
+                    # Auto-fallback: if filter returns nothing, show everything
+                    if not filtered_lists:
+                        filtered_lists = all_lists
+                        st.caption("ℹ️ No QA-filtered lists found — showing all lists.")
 
                 list_names = [name for name, _ in filtered_lists]
                 # Default to first "Ready for QA AU Post" list
