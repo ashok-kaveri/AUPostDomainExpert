@@ -62,10 +62,15 @@ class TrelloClient:
         self.token = token or os.getenv("TRELLO_TOKEN", "")
         self.board_id = board_id or os.getenv("TRELLO_BOARD_ID", "")
 
-        if not all([self.api_key, self.token, self.board_id]):
+        if not all([self.api_key, self.token]):
             raise ValueError(
                 "Trello credentials missing.\n"
-                "Set TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID in .env"
+                "Set TRELLO_API_KEY and TRELLO_TOKEN in .env"
+            )
+        if not self.board_id:
+            logger.warning(
+                "TRELLO_BOARD_ID not set — board-level operations (get_lists, etc.) "
+                "will fail. Select a board via the dashboard or set TRELLO_BOARD_ID in .env."
             )
 
     # -- helpers -----------------------------------------------------------
@@ -104,6 +109,29 @@ class TrelloClient:
         return resp.json()
 
     # -- board/list queries ------------------------------------------------
+
+    @classmethod
+    def list_all_boards(cls) -> list[dict]:
+        """
+        Return all boards the authenticated user has access to.
+        Does NOT require TRELLO_BOARD_ID — only needs API key + token.
+
+        Returns list of {"id": str, "name": str, "url": str, "closed": bool}
+        """
+        api_key = os.getenv("TRELLO_API_KEY", "")
+        token   = os.getenv("TRELLO_TOKEN", "")
+        if not api_key or not token:
+            raise ValueError("Set TRELLO_API_KEY and TRELLO_TOKEN in .env")
+        resp = requests.get(
+            f"{TRELLO_BASE}/members/me/boards",
+            params={"key": api_key, "token": token, "filter": "open", "fields": "name,url,closed"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return [
+            {"id": b["id"], "name": b["name"], "url": b.get("url", ""), "closed": b.get("closed", False)}
+            for b in resp.json()
+        ]
 
     def get_lists(self) -> list[TrelloList]:
         """Return all lists on the board."""

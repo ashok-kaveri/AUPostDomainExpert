@@ -212,6 +212,10 @@ def _init_state():
         st.session_state.pipeline_runs = _load_history()   # load from disk on first run
     if "trello_connected" not in st.session_state:
         st.session_state.trello_connected = False
+    if "selected_board_id" not in st.session_state:
+        st.session_state["selected_board_id"] = os.getenv("TRELLO_BOARD_ID", "")
+    if "selected_board_name" not in st.session_state:
+        st.session_state["selected_board_name"] = ""
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +237,7 @@ def _run_pipeline_for_card(card_id: str, dry_run: bool) -> dict:
     }
 
     try:
-        trello = TrelloClient()
+        trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
         card = trello.get_card(card_id)
         status["card_name"] = card.name
 
@@ -338,10 +342,10 @@ def _step_header(num: str, title: str) -> None:
 
 
 @st.cache_data(ttl=60)
-def _get_board_lists() -> list[tuple[str, str]]:
+def _get_board_lists(board_id: str = "") -> list[tuple[str, str]]:
     """Shared cached fetch of all Trello board lists — (name, id) pairs."""
     from pipeline.trello_client import TrelloClient
-    return [(l.name, l.id) for l in TrelloClient().get_lists()]
+    return [(l.name, l.id) for l in TrelloClient(board_id=board_id or None).get_lists()]
 
 
 def main():
@@ -362,7 +366,7 @@ def main():
     trello_ok = all([
         os.getenv("TRELLO_API_KEY"),
         os.getenv("TRELLO_TOKEN"),
-        os.getenv("TRELLO_BOARD_ID"),
+        (os.getenv("TRELLO_BOARD_ID") or st.session_state.get("selected_board_id")),
     ])
     slack_ok = bool(
         os.getenv("SLACK_WEBHOOK_URL", "").strip()
@@ -835,15 +839,58 @@ def main():
                 '<div class="step-chip">① Select Release</div>',
                 unsafe_allow_html=True,
             )
-            col_refresh = st.columns([1])[0]
+
+            # ── Active board indicator ─────────────────────────────────
+            _active_board_id   = st.session_state.get("selected_board_id", "")
+            _active_board_name = st.session_state.get("selected_board_name", "")
+            if _active_board_name:
+                st.success(f"📌 Active board: **{_active_board_name}**")
+            elif _active_board_id:
+                st.info(f"📌 Active board ID: `{_active_board_id}` (from .env)")
+
+            col_refresh, col_boards = st.columns([1, 1])
             with col_refresh:
-                if st.button("🔄 Refresh Trello lists", use_container_width=False):
+                if st.button("🔄 Refresh Trello lists", use_container_width=True):
                     st.cache_data.clear()
+                    st.session_state.pop("all_trello_boards", None)
                     st.rerun()
+            with col_boards:
+                if st.button("📋 List All Boards", use_container_width=True):
+                    with st.spinner("Fetching boards…"):
+                        try:
+                            _boards = TrelloClient.list_all_boards()
+                            st.session_state["all_trello_boards"] = _boards
+                        except Exception as _be:
+                            st.error(f"❌ {_be}")
+
+            if st.session_state.get("all_trello_boards"):
+                _boards = st.session_state["all_trello_boards"]
+                with st.expander(f"📋 Your Trello Boards ({len(_boards)})", expanded=True):
+                    for _b in _boards:
+                        _is_active = _b["id"] == st.session_state.get("selected_board_id")
+                        _bcol1, _bcol2 = st.columns([4, 1])
+                        with _bcol1:
+                            st.markdown(
+                                f"{'✅ ' if _is_active else ''}**{_b['name']}**  \n"
+                                f"ID: `{_b['id']}`  \n"
+                                f"[Open in Trello]({_b['url']})",
+                            )
+                        with _bcol2:
+                            if _is_active:
+                                st.caption("Active")
+                            else:
+                                if st.button("Select", key=f"sel_board_{_b['id']}",
+                                             type="primary", use_container_width=True):
+                                    st.session_state["selected_board_id"]   = _b["id"]
+                                    st.session_state["selected_board_name"] = _b["name"]
+                                    st.session_state.pop("all_trello_boards", None)
+                                    st.cache_data.clear()
+                                    st.rerun()
+                        st.divider()
 
             col_list, col_load = st.columns([4, 1])
             with col_list:
-                all_lists = _get_board_lists()
+                all_lists = _get_board_lists(st.session_state.get("selected_board_id", ""))
 
                 # Filter toggle — show only QA lists or all lists
                 show_all = st.toggle("Show all lists", value=False)
@@ -893,7 +940,7 @@ def main():
 
             # -- Load cards + auto-validate all
             if load_btn:
-                trello = TrelloClient()
+                trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
                 cards = trello.get_cards_in_list(selected_list_id)
                 st.session_state["rqa_cards"] = cards
                 st.session_state["rqa_list_name"] = selected_list_name
@@ -1101,7 +1148,7 @@ def main():
                                 if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
                                              use_container_width=True, type="primary"):
                                     with st.spinner("Updating Trello description…"):
-                                        TrelloClient().update_card_description(card.id, ac_suggestion)
+                                        TrelloClient(board_id=st.session_state.get("selected_board_id") or None).update_card_description(card.id, ac_suggestion)
                                         card.desc = ac_suggestion
                                     st.session_state[ac_saved_key] = True
                                     st.rerun()
@@ -1352,7 +1399,7 @@ def main():
                                 if st.button("🔄 Re-validate after fix", key=f"reval_{card.id}"):
                                     # Refresh card from Trello + re-run validation
                                     with st.spinner("Fetching updated card from Trello…"):
-                                        fresh = TrelloClient().get_card(card.id)
+                                        fresh = TrelloClient(board_id=st.session_state.get("selected_board_id") or None).get_card(card.id)
                                     with st.spinner("Re-validating…"):
                                         st.session_state[val_key] = validate_card(
                                             card_name=fresh.name,
@@ -2143,7 +2190,7 @@ def main():
                                 with col_approve:
                                     if st.button("✅ Approve & Save", key=f"approve_{card.id}",
                                                  use_container_width=True, type="primary"):
-                                        trello = TrelloClient()
+                                        trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
 
                                         # 1. Write to Trello card
                                         with st.spinner("Saving to Trello…"):
@@ -2738,7 +2785,7 @@ def main():
                 st.divider()
                 if approved_count < len(cards):
                     if st.button("✅ Approve ALL remaining", type="primary"):
-                        trello = TrelloClient()
+                        trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
                         remaining = [c for c in cards if not approved_store.get(c.id)]
                         rag_total = 0
                         for card in remaining:
@@ -3191,7 +3238,7 @@ def main():
         else:
             from pipeline.trello_client import TrelloClient
 
-            all_board_lists = _get_board_lists()
+            all_board_lists = _get_board_lists(st.session_state.get("selected_board_id", ""))
             all_list_names  = [name for name, _ in all_board_lists]
             all_list_ids    = {name: lid for name, lid in all_board_lists}
 
@@ -3240,7 +3287,7 @@ def main():
             move_target      = selected_tgt_list
 
             if load_done_btn:
-                trello = TrelloClient()
+                trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
                 done_cards = trello.get_cards_in_list(selected_done_id)
                 st.session_state["dd_cards"] = done_cards
                 st.session_state["dd_checked"] = {c.id: False for c in done_cards}
@@ -3275,7 +3322,7 @@ def main():
                     )
 
                 if move_btn and selected_ids:
-                    trello = TrelloClient()
+                    trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
                     move_target_id = all_list_ids.get(move_target, "")
                     moved = 0
                     for card in dd_cards:
@@ -3566,7 +3613,7 @@ def main():
                     ):
                         if trello_ok:
                             from pipeline.trello_client import TrelloClient
-                            trello_cl = TrelloClient()
+                            trello_cl = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
                             moved = 0
                             for card in so_cards:
                                 if so_approved.get(card.id) and any(
