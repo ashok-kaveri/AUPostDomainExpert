@@ -907,23 +907,29 @@ def main():
                 default_idx = next(
                     (i for i, n in enumerate(list_names) if ("aupost" in n.lower() or "australia post" in n.lower()) and "ready for qa" in n.lower()), 0
                 )
-                selected_list_name = st.selectbox(
-                    f"Select release list ({len(list_names)} lists)",
-                    list_names,
-                    index=default_idx,
-                )
+                if list_names:
+                    selected_list_name = st.selectbox(
+                        f"Select release list ({len(list_names)} lists)",
+                        list_names,
+                        index=default_idx,
+                    )
+                else:
+                    st.info("No lists found on this board. Try enabling 'Show all lists' or select a different board.")
+                    selected_list_name = None
                 selected_list_id = next((lid for name, lid in filtered_lists if name == selected_list_name), "")
 
             with col_load:
                 st.write("")
                 st.write("")
-                load_btn = st.button("📥 Load Cards", use_container_width=True)
+                load_btn = st.button("📥 Load Cards", use_container_width=True, disabled=not selected_list_id)
 
             # -- Release version input (editable, auto-filled from list name)
-            def _extract_release(list_name: str) -> str:
+            def _extract_release(list_name: str | None) -> str:
                 """Extract release label from list name.
                 'Ready for QA AUPostapp 2.3.115' → 'AUPostapp 2.3.115'
                 """
+                if not list_name:
+                    return ""
                 m = re.search(r'(aupost\w*\s+[\d.]+)', list_name, re.IGNORECASE)
                 if m:
                     return m.group(1).strip()
@@ -939,7 +945,7 @@ def main():
             )
 
             # -- Load cards + auto-validate all
-            if load_btn:
+            if load_btn and selected_list_id:
                 trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
                 cards = trello.get_cards_in_list(selected_list_id)
                 st.session_state["rqa_cards"] = cards
