@@ -1153,7 +1153,7 @@ def main():
                             st.success("✅ AI-generated AC saved to Trello description")
                         elif ac_suggestion:
                             st.markdown(ac_suggestion)
-                            col_save_ac, col_skip_ac, col_dm_ac, col_ch_ac = st.columns(4)
+                            col_save_ac, col_comment_ac, col_skip_ac, col_dm_ac, col_ch_ac = st.columns(5)
                             with col_save_ac:
                                 if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
                                              use_container_width=True, type="primary"):
@@ -1162,6 +1162,12 @@ def main():
                                         card.desc = ac_suggestion
                                     st.session_state[ac_saved_key] = True
                                     st.rerun()
+                            with col_comment_ac:
+                                if st.button("💬 Add to Trello Comment", key=f"comment_ac_{card.id}",
+                                             use_container_width=True):
+                                    with st.spinner("Adding comment to Trello card…"):
+                                        TrelloClient(board_id=st.session_state.get("selected_board_id") or None).add_comment(card.id, ac_suggestion)
+                                    st.success("✅ AC added as Trello comment")
                             with col_skip_ac:
                                 if st.button("⏭️ Skip — Keep Existing", key=f"skip_ac_{card.id}",
                                              use_container_width=True):
