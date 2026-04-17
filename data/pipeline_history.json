@@ -6,5 +6,77 @@
     "test_cases": "# Test Cases: MCSL/WSS HS Code Disappearing While Editing Package\n\n### TC-1: HS Code and Description Persist When Generating Label Without Package Edits\n**Type:** Positive\n**Priority:** High\n**Preconditions:** \n- User is logged into the PH AU Post app\n- A Shopify order exists with products that have HS codes and custom descriptions configured\n- The order is ready for shipment label generation\n\n**Steps:**\nGiven I am on the Order Details page in the PH AU Post app\nWhen I navigate to the Shipping L…",
     "rag_chunks": 0,
     "approved_at": "2026-04-13 11:20"
+  },
+  "69de80750dd09ecadd952070": {
+    "card_name": "🏷️ C-08 | Suburb Normalisation — Label Generation Fix",
+    "card_url": "https://trello.com/c/Sv6NAAtM/2-%F0%9F%8F%B7%EF%B8%8F-c-08-suburb-normalisation-label-generation-fix",
+    "release": "v1.0.32",
+    "test_cases": "# Test Cases: C-08 | Suburb Normalisation — Label Generation Fix\n\n---\n\n### TC-1: Suburb normalisation — \"Saint Clair\" to \"St Clair\" on label generation\n**Type:** Positive\n**Priority:** High\n**Preconditions:** \n- Merchant is logged into PH AU Post app\n- An order exists with shipping address containing suburb \"Saint Clair\"\n- Australia Post API credentials are configured and valid\n\n**Steps:**\nGiven I am on the Orders Grid in the PH AU Post app\nWhen I select an order with suburb \"Saint Clair\" in the…",
+    "rag_chunks": 48,
+    "approved_at": "2026-04-16 15:20"
+  },
+  "69de80766e7e7519cd7b02e9": {
+    "card_name": "🏷️ C-09 | Test Labels Fix — Labels Rejected by AU Post",
+    "card_url": "https://trello.com/c/E1yDx9gD/3-%F0%9F%8F%B7%EF%B8%8F-c-09-test-labels-fix-labels-rejected-by-au-post",
+    "release": "v1.0.32",
+    "test_cases": "# Test Cases for C-09 | Labels Fix — Labels Rejected by AU Post\n\n---\n\n### TC-1: Sandbox Credentials Detected — Warning Banner Displayed\n**Type:** Positive\n**Priority:** High\n**Preconditions:** Merchant is logged into PH AU Post app; AU Post account is configured with sandbox API credentials; merchant has completed onboarding\n\n**Steps:**\nGiven I am logged into the PH AU Post app with sandbox credentials configured\nWhen I navigate to Orders and select an order to generate a label\nAnd I click \"Gene…",
+    "rag_chunks": 48,
+    "approved_at": "2026-04-16 15:25"
+  },
+  "69de8077a8a9f2211ec85a04": {
+    "card_name": "🚀 C-10 | CCS Not Enabled — In-App Detection Banner",
+    "card_url": "https://trello.com/c/0HJhoaxA/4-%F0%9F%9A%80-c-10-ccs-not-enabled-in-app-detection-banner",
+    "release": "v1.0.32",
+    "test_cases": "# Test Cases for C-10 | CCS Not Enabled — In-App Detection Banner\n\n---\n\n### TC-1: CCS Disabled Banner Displays on Home Page for Basic Plan\n**Type:** Positive\n**Priority:** High\n**Preconditions:** Merchant is on Shopify Basic plan; CCS is not enabled; app config includes \"basic\": \"unavailable\" mapping; merchant is logged into PH AU Post app\n\n**Steps:**\nGiven I am a newly onboarded merchant on Shopify Basic plan without CCS enabled\nWhen I open the PH AU Post app and navigate to the home page\nThen …",
+    "rag_chunks": 58,
+    "approved_at": "2026-04-16 15:28"
+  },
+  "69de80787ff16f57dee7d101": {
+    "card_name": "🏷️ C-31 | Sample Label Generation 400 Error (Reopened)",
+    "card_url": "https://trello.com/c/hWs49gK6/5-%F0%9F%8F%B7%EF%B8%8F-c-31-sample-label-generation-400-error-reopened",
+    "release": "v1.0.32",
+    "test_cases": "# Updated Test Cases for C-31 | Sample Label Generation 400 Error (Reopened)\n\n---\n\n## ⚠️ BLOCKING DEPENDENCIES — DO NOT EXECUTE UNTIL RESOLVED\n\n**Before any test execution, the dev team must provide:**\n\n1. **Root Cause Documentation** — Confirmed root cause of the 400 error on Nicole's store (1af741.myshopify.com), with error payload and server logs from the Australia Post sample label endpoint\n2. **Fix Details** — Specific code change deployed, component/endpoint modified, and environment deplo…",
+    "rag_chunks": 50,
+    "approved_at": "2026-04-16 15:37"
+  },
+  "69de81631f72e5c5d2635bab": {
+    "card_name": "⚠️ C-22 · REGRESSION: Order Grid — SKU & Customer Filter Cross-Results",
+    "card_url": "https://trello.com/c/ajkecd9Z/6-%E2%9A%A0%EF%B8%8F-c-22-regression-order-grid-sku-customer-filter-cross-results",
+    "release": "v1.0.32",
+    "test_cases": "# Test Cases for C-22: Order Grid — SKU & Customer Filter Cross-Results\n\n---\n\n### TC-1: SKU Filter Returns Only SKU Matches\n**Type:** Positive\n**Priority:** High\n**Preconditions:** User is logged into the PH AU Post app; Order Grid is accessible; database contains at least 5 orders with distinct SKUs and customer names (e.g., Order 1: SKU=\"SKU-12345\", Customer=\"John Smith\"; Order 2: SKU=\"SKU-67890\", Customer=\"Jane Doe\"; Order 3: SKU=\"SKU-12345\", Customer=\"Mike Johnson\")\n\n**Steps:**\nGiven I am vi…",
+    "rag_chunks": 61,
+    "approved_at": "2026-04-16 15:43"
+  },
+  "69de81657a0f2527fe6da211": {
+    "card_name": "⚠️ C-23 · REGRESSION: Return Tab Missing Filter Options",
+    "card_url": "https://trello.com/c/1A7okE3U/7-%E2%9A%A0%EF%B8%8F-c-23-regression-return-tab-missing-filter-options",
+    "release": "v1.0.32",
+    "test_cases": "# Test Cases for C-23 · REGRESSION: Return Tab Missing Filter Options\n\n---\n\n### TC-1: Filter bar visibility on Returns tab load\n**Type:** Positive\n**Priority:** High\n**Preconditions:** User is logged into PH AU Post app with MyPost Business account; at least one return record exists in the system\n\n**Steps:**\nGiven I am logged into the PH AU Post app as a MyPost Business merchant\nWhen I navigate to the Returns tab\nThen the filter bar is visible at the top of the Returns list\nAnd the filter bar di…",
+    "rag_chunks": 53,
+    "approved_at": "2026-04-16 15:49"
+  },
+  "69de818a8143adfb71a9633d": {
+    "card_name": "⚠️ C-24 · REGRESSION: Bulk Action Footer Misaligned Mid-List",
+    "card_url": "https://trello.com/c/suqsrwG4/8-%E2%9A%A0%EF%B8%8F-c-24-regression-bulk-action-footer-misaligned-mid-list",
+    "release": "v1.0.32",
+    "test_cases": "# Test Cases for C-24: Bulk Action Footer Misaligned Mid-List\n\n---\n\n### TC-1: Footer fixed at bottom when single order selected\n**Type:** Positive\n**Priority:** High\n**Preconditions:** User is logged into PH AU Post app; Orders Grid is displayed with at least 5 orders; no orders are currently selected\n\n**Steps:**\nGiven I am viewing the Orders Grid in the PH AU Post app\nWhen I click the checkbox to select one order\nThen the bulk action footer appears at the bottom of the viewport\nAnd the footer i…",
+    "rag_chunks": 61,
+    "approved_at": "2026-04-16 15:58"
+  },
+  "69de818cd4c52bf82c2af892": {
+    "card_name": "⚠️ C-25 · REGRESSION: Order Selection Persists After Filter Clear",
+    "card_url": "https://trello.com/c/ZwXqJJ9g/9-%E2%9A%A0%EF%B8%8F-c-25-regression-order-selection-persists-after-filter-clear",
+    "release": "v1.0.32",
+    "test_cases": "# Test Cases for C-25: Order Selection Persists After Filter Clear\n\n---\n\n### TC-1: Filter clear resets all selected orders\n**Type:** Positive\n**Priority:** High\n**Preconditions:** User is logged into PH AU Post app; Orders Grid is displayed with at least 5 orders; no filters are currently active\n\n**Steps:**\nGiven I am on the Orders Grid page with multiple orders visible\nWhen I select 3 orders by clicking their checkboxes\nAnd I apply a filter (e.g., Status = \"Pending\")\nAnd I click the \"Clear Filt…",
+    "rag_chunks": 56,
+    "approved_at": "2026-04-16 16:04"
+  },
+  "69de818ecca9cf3baffc86ee": {
+    "card_name": "⚠️ C-26 · REGRESSION: Order Grid Tab Headers Disappear After Filter",
+    "card_url": "https://trello.com/c/k7BTaop1/10-%E2%9A%A0%EF%B8%8F-c-26-regression-order-grid-tab-headers-disappear-after-filter",
+    "release": "v1.0.32",
+    "test_cases": "# Test Cases for C-26: Order Grid Tab Headers Disappear After Filter\n\n---\n\n### TC-1: Tab headers remain visible after single filter applied\n**Type:** Positive\n**Priority:** High\n**Preconditions:** User is logged into the PH AU Post app as a MyPost Business merchant; the Orders tab is active with no filters applied; the Order Grid contains at least 5 orders\n\n**Steps:**\nGiven I am logged into the PH AU Post app and viewing the Orders tab in the Order Grid\nWhen I apply a filter for Status \"Processi…",
+    "rag_chunks": 53,
+    "approved_at": "2026-04-16 16:16"
   }
 }
