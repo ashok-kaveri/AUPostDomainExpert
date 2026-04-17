@@ -151,7 +151,6 @@ Return ONLY valid JSON (no markdown, no fences) with this exact structure:
     {{"label": "ALL-CAPS keyword (max 12 chars)", "detail": "One sentence"}}
   ],
   "user_story": "As a merchant using the AU Post Shopify App, I want to [do X] so that [Y].",
-  "coming_soon": "One sentence about a natural future enhancement to this feature.",
   "how_to_steps": [
     {{"step": "Short action label", "detail": "One sentence telling QA/support how to do it"}}
   ],
@@ -327,16 +326,15 @@ def _section_promo(content: dict) -> list:
     elems.append(_p(content["problem_intro"], _BODY))
     elems.append(_sp(0.3))
 
-    # Pain points table
+    # Pain points table — use plain bold text labels (no missing icon chars)
     pp_rows = []
     for pt in content["pain_points"]:
-        icon = pt.get("icon", "")
-        fc = colors.HexColor("#C0392B")
+        label = pt.get("icon", "") or pt.get("title", "!")
         pp_rows.append([
-            _p(icon, _ps(f"ic{icon}", fontName="Arial-Bold", fontSize=8.5, textColor=WHITE, alignment=TA_CENTER)),
+            _p(f'<b>{label}</b>', _ps(f"ic{label}", fontName="Arial-Bold", fontSize=8, textColor=WHITE, alignment=TA_CENTER)),
             _p(pt["text"], _CELL),
         ])
-    pp_t = Table(pp_rows, colWidths=[1.5 * cm, CW - 1.5 * cm])
+    pp_t = Table(pp_rows, colWidths=[2 * cm, CW - 2 * cm])
     pp_t.setStyle(TableStyle([
         ("BACKGROUND",    (0, 0), (0, -1), colors.HexColor("#C0392B")),
         ("ROWBACKGROUNDS",(1, 0), (-1, -1),[WHITE, LIGHT_BG]),
@@ -412,23 +410,6 @@ def _section_promo(content: dict) -> list:
     elems.append(_p(f'\u201C{content["user_story"]}\u201D', _QA_I))
     elems.append(_sp(0.3))
 
-    # Coming soon
-    cs_t = Table(
-        [[_p("COMING SOON", _CS_LBL), _p(content["coming_soon"], _CS_D)]],
-        colWidths=[2.5 * cm, CW - 2.5 * cm],
-    )
-    cs_t.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (0, -1), colors.HexColor("#FFF3E0")),
-        ("BACKGROUND",    (1, 0), (-1, -1), colors.HexColor("#FFF8F0")),
-        ("BOX",           (0, 0), (-1, -1), 0.5, ORANGE),
-        ("TOPPADDING",    (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
-        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-    ]))
-    elems.append(cs_t)
-
     return elems
 
 
@@ -446,20 +427,19 @@ def _section_training(content: dict, sav_report) -> list:
             _p(s["step"], _STEP_A),
             _p(s["detail"], _STEP_D),
         ])
-    step_t = Table(step_rows, colWidths=[0.8 * cm, 5 * cm, CW - 5.8 * cm])
+    _step_color_cmds = [("BACKGROUND", (0, i), (0, i), PURPLE) for i in range(len(step_rows))]
+    step_t = Table(step_rows, colWidths=[0.9 * cm, 5 * cm, CW - 5.9 * cm])
     step_t.setStyle(TableStyle([
         ("ROWBACKGROUNDS",  (1, 0), (-1, -1), [WHITE, LIGHT_BG]),
         ("BOX",             (0, 0), (-1, -1), 0.5, MID_GREY),
         ("LINEABOVE",       (0, 1), (-1, -1), 0.4, MID_GREY),
         ("TOPPADDING",      (0, 0), (-1, -1), 8),
         ("BOTTOMPADDING",   (0, 0), (-1, -1), 8),
-        ("LEFTPADDING",     (0, 0), (-1, -1), 8),
-        ("RIGHTPADDING",    (0, 0), (-1, -1), 8),
+        ("LEFTPADDING",     (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING",    (0, 0), (-1, -1), 6),
         ("VALIGN",          (0, 0), (-1, -1), "MIDDLE"),
+        *_step_color_cmds,
     ]))
-    step_t.setStyle(TableStyle(
-        [("BACKGROUND", (0, i), (0, i), PURPLE) for i in range(len(step_rows))]
-    ))
     elems.append(step_t)
     elems.append(_sp(0.4))
 
@@ -530,7 +510,7 @@ def _section_training(content: dict, sav_report) -> list:
             ])
             global_num += 1
 
-        tc_t = Table(tc_rows, colWidths=[0.7 * cm, 6 * cm, 7.5 * cm, 2 * cm], repeatRows=1)
+        tc_t = Table(tc_rows, colWidths=[0.8 * cm, 6.5 * cm, 7.2 * cm, 2.5 * cm], repeatRows=1)
         tc_t.setStyle(TableStyle([
             ("BACKGROUND",    (0, 0), (-1, 0),  gc),
             ("ROWBACKGROUNDS",(0, 1), (-1, -1), [WHITE, LIGHT_BG]),
