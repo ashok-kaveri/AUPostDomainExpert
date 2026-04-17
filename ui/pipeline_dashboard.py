@@ -1862,7 +1862,7 @@ def main():
 
                             if _biz_is_running:
                                 if _biz_result.get("done"):
-                                    # Thread finished — harvest result
+                                    # Thread finished — harvest and show result
                                     st.session_state[_biz_run_key] = False
                                     if _biz_result.get("error"):
                                         st.error(f"❌ {_biz_result['error']}")
@@ -1871,12 +1871,13 @@ def main():
                                     st.session_state.pop(_biz_result_key, None)
                                     st.rerun()
                                 else:
-                                    # Still running — show disabled button + poll
+                                    # Still running — static message + manual refresh
                                     st.button("⏳ Generating Business Doc…", key=f"biz_busy_{card.id}",
                                               use_container_width=True, disabled=True)
-                                    st.caption("✍️ Claude is writing content… please wait")
-                                    time.sleep(1)
-                                    st.rerun()
+                                    st.caption("✍️ Claude is writing content in the background…")
+                                    if st.button("🔄 Check if ready", key=f"biz_check_{card.id}",
+                                                 use_container_width=True):
+                                        st.rerun()
                             elif st.button(
                                 "📄 Generate Business Document",
                                 key=f"gen_biz_{card.id}",
@@ -1908,7 +1909,7 @@ def main():
                                 threading.Thread(target=_run_biz_thread, daemon=True).start()
                                 st.rerun()
 
-                            # Show download + open button if PDF was generated
+                            # Show download button if PDF is ready
                             _biz_path = st.session_state.get(_biz_key)
                             if _biz_path and Path(_biz_path).exists():
                                 st.success("✅ Business Pitch ready")
@@ -1934,7 +1935,7 @@ def main():
 
                             if _det_is_running:
                                 if _det_result.get("done"):
-                                    # Thread finished — harvest result
+                                    # Thread finished — harvest and show result
                                     st.session_state[_det_run_key] = False
                                     if _det_result.get("error"):
                                         st.error(f"❌ {_det_result['error']}")
@@ -1943,12 +1944,13 @@ def main():
                                     st.session_state.pop(_det_result_key, None)
                                     st.rerun()
                                 else:
-                                    # Still running — show disabled button + poll
+                                    # Still running — static message + manual refresh
                                     st.button("⏳ Generating Detailed Report…", key=f"det_busy_{card.id}",
                                               use_container_width=True, disabled=True)
-                                    st.caption("✍️ Claude is writing content… please wait")
-                                    time.sleep(1)
-                                    st.rerun()
+                                    st.caption("✍️ Claude is writing content in the background…")
+                                    if st.button("🔄 Check if ready", key=f"det_check_{card.id}",
+                                                 use_container_width=True):
+                                        st.rerun()
                             elif st.button(
                                 "📊 Generate Detailed Report",
                                 key=f"gen_det_{card.id}",
@@ -1983,11 +1985,10 @@ def main():
                                 threading.Thread(target=_run_det_thread, daemon=True).start()
                                 st.rerun()
 
+                            # Show download button if PDF is ready
                             _det_path = st.session_state.get(_det_key)
                             if _det_path and Path(_det_path).exists():
-                                _sav_note = ""
-                                if st.session_state.get(f"sav_report_{card.id}"):
-                                    _sav_note = " (with SAV results)"
+                                _sav_note = " (with SAV results)" if st.session_state.get(f"sav_report_{card.id}") else ""
                                 st.success(f"✅ Detailed Report ready{_sav_note}")
                                 with open(_det_path, "rb") as _df:
                                     st.download_button(
