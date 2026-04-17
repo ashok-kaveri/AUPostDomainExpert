@@ -290,38 +290,28 @@ def _cover(content: dict, card_id: str, card_url: str, date_str: str) -> list:
 
 # ── Section header helper ──────────────────────────────────────────────────────
 def _section_chip(num: int, title: str, subtitle: str) -> list:
-    """Numbered section chip like the reference doc."""
-    chip_t = Table(
-        [[_p(str(num), _ps(f"cn{num}", fontName="Arial-Bold", fontSize=14, textColor=WHITE, alignment=TA_CENTER))]],
-        colWidths=[1.2 * cm], rowHeights=[1.2 * cm],
-    )
-    chip_t.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, -1), PURPLE),
-        ("TOPPADDING",    (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
-    ]))
-    text_t = Table([[
-        _p(title, _ps(f"st{num}", fontName="Arial-Bold", fontSize=16, textColor=PURPLE, leading=20)),
-        _p(subtitle, _ps(f"ss{num}", fontName="Arial-Italic", fontSize=10, textColor=BODY_GREY, leading=14)),
-    ]], colWidths=[6 * cm, CW - 7.2 * cm])
-    text_t.setStyle(TableStyle([
+    """Numbered section chip — flat table (no nesting to avoid ReportLab width errors)."""
+    num_col_w  = 1.4 * cm
+    text_col_w = CW - num_col_w
+    chip_rows = [[
+        _p(str(num), _ps(f"cn{num}", fontName="Arial-Bold", fontSize=14,
+                         textColor=WHITE, alignment=TA_CENTER)),
+        _p(f'<b>{title}</b><br/><font size="9" color="#555555"><i>{subtitle}</i></font>',
+           _ps(f"st{num}", fontName="Arial-Bold", fontSize=15, textColor=PURPLE,
+               leading=20, spaceBefore=2)),
+    ]]
+    t = Table(chip_rows, colWidths=[num_col_w, text_col_w])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (0, 0),  PURPLE),
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
-        ("TOPPADDING",    (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING",    (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING",   (0, 0), (0, 0),  4),
+        ("RIGHTPADDING",  (0, 0), (0, 0),  4),
+        ("LEFTPADDING",   (1, 0), (1, 0),  12),
+        ("RIGHTPADDING",  (1, 0), (1, 0),  0),
     ]))
-    outer = Table([[chip_t, text_t]], colWidths=[1.2 * cm, CW - 1.2 * cm])
-    outer.setStyle(TableStyle([
-        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
-        ("TOPPADDING",    (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-    ]))
-    return [_sp(0.5), outer, _sp(0.4)]
+    return [_sp(0.5), t, _sp(0.3)]
 
 
 def _subsec_head(title: str) -> list:
@@ -358,7 +348,7 @@ def _section_promo(content: dict) -> list:
         ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
-    elems.append(KeepTogether(pp_t))
+    elems.append(pp_t)
     elems.append(_sp(0.4))
 
     # Solution features
@@ -377,6 +367,8 @@ def _section_promo(content: dict) -> list:
             _p(f'<b>{sf["heading"]}</b>', _FEAT_H),
             _p(sf["desc"], _FEAT_D),
         ])
+    _sf_color_cmds = [("BACKGROUND", (0, i), (0, i), _LABEL_COLORS[i % len(_LABEL_COLORS)])
+                      for i in range(len(sf_rows))]
     sf_t = Table(sf_rows, colWidths=[1.5 * cm, 3.5 * cm, CW - 5 * cm])
     sf_t.setStyle(TableStyle([
         ("ROWBACKGROUNDS", (1, 0), (-1, -1), [WHITE, LIGHT_BG]),
@@ -387,12 +379,9 @@ def _section_promo(content: dict) -> list:
         ("LEFTPADDING",   (0, 0), (-1, -1), 8),
         ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
         ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        *_sf_color_cmds,
     ]))
-    # Color each label cell per row
-    for i in range(len(sf_rows)):
-        fc = _LABEL_COLORS[i % len(_LABEL_COLORS)]
-        sf_t.setStyle(TableStyle([("BACKGROUND", (0, i), (0, i), fc)]))
-    elems.append(KeepTogether(sf_t))
+    elems.append(sf_t)
     elems.append(_sp(0.4))
 
     # Key benefits
@@ -415,7 +404,7 @@ def _section_promo(content: dict) -> list:
         ("VALIGN",         (0, 0), (-1, -1), "MIDDLE"),
         ("LINEAFTER",      (0, 0), (0, -1), 1.5, ORANGE),
     ]))
-    elems.append(KeepTogether(ben_t))
+    elems.append(ben_t)
     elems.append(_sp(0.4))
 
     # User Story
@@ -438,7 +427,7 @@ def _section_promo(content: dict) -> list:
         ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
-    elems.append(KeepTogether(cs_t))
+    elems.append(cs_t)
 
     return elems
 
@@ -468,9 +457,10 @@ def _section_training(content: dict, sav_report) -> list:
         ("RIGHTPADDING",    (0, 0), (-1, -1), 8),
         ("VALIGN",          (0, 0), (-1, -1), "MIDDLE"),
     ]))
-    for i in range(len(step_rows)):
-        step_t.setStyle(TableStyle([("BACKGROUND", (0, i), (0, i), PURPLE)]))
-    elems.append(KeepTogether(step_t))
+    step_t.setStyle(TableStyle(
+        [("BACKGROUND", (0, i), (0, i), PURPLE) for i in range(len(step_rows))]
+    ))
+    elems.append(step_t)
     elems.append(_sp(0.4))
 
     # Date presets (only if present)
@@ -495,7 +485,7 @@ def _section_training(content: dict, sav_report) -> list:
             ("VALIGN",         (0, 0), (-1, -1), "MIDDLE"),
             ("LINEAFTER",      (0, 0), (0, -1), 1.5, ORANGE),
         ]))
-        elems.append(KeepTogether(dp_t))
+        elems.append(dp_t)
         elems.append(_sp(0.4))
 
     # Test cases
@@ -571,7 +561,7 @@ def _section_training(content: dict, sav_report) -> list:
             _p(ac["item"], _CELL),
             s_p,
         ])
-    ac_t = Table(ac_rows, colWidths=[0.5 * cm, CW - 3 * cm, 2.5 * cm])
+    ac_t = Table(ac_rows, colWidths=[0.8 * cm, CW - 3.3 * cm, 2.5 * cm])
     ac_t.setStyle(TableStyle([
         ("ROWBACKGROUNDS", (0, 0), (-1, -1), [WHITE, LIGHT_BG]),
         ("BOX",           (0, 0), (-1, -1), 0.5, GREEN),
@@ -582,7 +572,7 @@ def _section_training(content: dict, sav_report) -> list:
         ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
-    elems.append(KeepTogether(ac_t))
+    elems.append(ac_t)
     elems.append(_sp(0.3))
 
     # All passed banner
