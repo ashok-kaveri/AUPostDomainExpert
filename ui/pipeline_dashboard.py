@@ -1860,22 +1860,23 @@ def main():
                             _biz_is_running = st.session_state.get(_biz_run_key, False)
                             _biz_result     = st.session_state.get(_biz_result_key, {})
 
-                            # Check if thread finished
-                            if _biz_is_running and _biz_result.get("done"):
-                                st.session_state[_biz_run_key] = False
-                                if _biz_result.get("error"):
-                                    st.error(f"❌ {_biz_result['error']}")
-                                else:
-                                    st.session_state[_biz_key] = _biz_result["path"]
-                                st.session_state.pop(_biz_result_key, None)
-                                st.rerun()
-
                             if _biz_is_running:
-                                st.button("⏳ Generating Business Doc…", key=f"biz_busy_{card.id}",
-                                          use_container_width=True, disabled=True)
-                                with st.spinner("Claude is writing the Business Pitch…"):
-                                    time.sleep(2)
-                                st.rerun()
+                                if _biz_result.get("done"):
+                                    # Thread finished — harvest result
+                                    st.session_state[_biz_run_key] = False
+                                    if _biz_result.get("error"):
+                                        st.error(f"❌ {_biz_result['error']}")
+                                    else:
+                                        st.session_state[_biz_key] = _biz_result["path"]
+                                    st.session_state.pop(_biz_result_key, None)
+                                    st.rerun()
+                                else:
+                                    # Still running — show disabled button + poll
+                                    st.button("⏳ Generating Business Doc…", key=f"biz_busy_{card.id}",
+                                              use_container_width=True, disabled=True)
+                                    st.caption("✍️ Claude is writing content… please wait")
+                                    time.sleep(1)
+                                    st.rerun()
                             elif st.button(
                                 "📄 Generate Business Document",
                                 key=f"gen_biz_{card.id}",
@@ -1931,21 +1932,23 @@ def main():
                             _det_is_running = st.session_state.get(_det_run_key, False)
                             _det_result     = st.session_state.get(_det_result_key, {})
 
-                            if _det_is_running and _det_result.get("done"):
-                                st.session_state[_det_run_key] = False
-                                if _det_result.get("error"):
-                                    st.error(f"❌ {_det_result['error']}")
-                                else:
-                                    st.session_state[_det_key] = _det_result["path"]
-                                st.session_state.pop(_det_result_key, None)
-                                st.rerun()
-
                             if _det_is_running:
-                                st.button("⏳ Generating Detailed Report…", key=f"det_busy_{card.id}",
-                                          use_container_width=True, disabled=True)
-                                with st.spinner("Claude is writing the Detailed Report…"):
-                                    time.sleep(2)
-                                st.rerun()
+                                if _det_result.get("done"):
+                                    # Thread finished — harvest result
+                                    st.session_state[_det_run_key] = False
+                                    if _det_result.get("error"):
+                                        st.error(f"❌ {_det_result['error']}")
+                                    else:
+                                        st.session_state[_det_key] = _det_result["path"]
+                                    st.session_state.pop(_det_result_key, None)
+                                    st.rerun()
+                                else:
+                                    # Still running — show disabled button + poll
+                                    st.button("⏳ Generating Detailed Report…", key=f"det_busy_{card.id}",
+                                              use_container_width=True, disabled=True)
+                                    st.caption("✍️ Claude is writing content… please wait")
+                                    time.sleep(1)
+                                    st.rerun()
                             elif st.button(
                                 "📊 Generate Detailed Report",
                                 key=f"gen_det_{card.id}",
