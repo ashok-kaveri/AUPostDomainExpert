@@ -216,6 +216,10 @@ def _init_state():
         st.session_state["selected_board_id"] = os.getenv("TRELLO_BOARD_ID", "")
     if "selected_board_name" not in st.session_state:
         st.session_state["selected_board_name"] = ""
+    if "shopify_email" not in st.session_state:
+        st.session_state["shopify_email"] = os.getenv("USER_EMAIL", "")
+    if "shopify_password" not in st.session_state:
+        st.session_state["shopify_password"] = os.getenv("USER_PASSWORD", "")
 
 
 # ---------------------------------------------------------------------------
@@ -1452,12 +1456,52 @@ def main():
                         sav_report  = st.session_state.get(_sav_key)
                         sav_qa      = st.session_state.get(_sav_qa_key, {})   # {scenario: answer}
 
-                        # ── URL row ───────────────────────────────────────
+                        # ── URL + Credentials row ─────────────────────────
                         try:
                             from pipeline.smart_ac_verifier import get_auto_app_url
                             _auto_url = get_auto_app_url()
                         except Exception:
                             _auto_url = ""
+
+                        with st.expander("🔑 App URL & Login Credentials", expanded=False):
+                            _cred_col1, _cred_col2 = st.columns([2, 1])
+                            with _cred_col1:
+                                _sav_app_url_global = st.text_input(
+                                    "App URL",
+                                    value=st.session_state.get("sav_global_url", _auto_url),
+                                    placeholder="https://admin.shopify.com/store/yourstore/apps/...",
+                                    key=f"sav_global_url_input_{card.id}",
+                                )
+                                if _sav_app_url_global:
+                                    st.session_state["sav_global_url"] = _sav_app_url_global
+                            with _cred_col2:
+                                st.caption("Leave blank to use URL from automation repo .env")
+
+                            _cr1, _cr2, _cr3 = st.columns([2, 2, 1])
+                            with _cr1:
+                                _email_val = st.text_input(
+                                    "Shopify Email",
+                                    value=st.session_state.get("shopify_email", ""),
+                                    placeholder="you@example.com",
+                                    key=f"shopify_email_input_{card.id}",
+                                )
+                                if _email_val:
+                                    st.session_state["shopify_email"] = _email_val
+                            with _cr2:
+                                _pass_val = st.text_input(
+                                    "Shopify Password",
+                                    value=st.session_state.get("shopify_password", ""),
+                                    placeholder="••••••••",
+                                    type="password",
+                                    key=f"shopify_password_input_{card.id}",
+                                )
+                                if _pass_val:
+                                    st.session_state["shopify_password"] = _pass_val
+                            with _cr3:
+                                st.caption("Used if auth.json is missing or expired")
+
+                        # resolve URL: expander override → per-card field → auto-detect
+                        _global_url_override = st.session_state.get("sav_global_url", "")
 
                         # ── Complexity selector ────────────────────────────
                         _COMPLEXITY_MAP = {
@@ -1482,7 +1526,7 @@ def main():
                         with col_sav2:
                             sav_url = st.text_input(
                                 "App URL",
-                                value=_auto_url,
+                                value=_global_url_override or _auto_url,
                                 placeholder="https://admin.shopify.com/store/yourstore/apps/testing-553",
                                 key=f"sav_url_{card.id}",
                                 label_visibility="collapsed",
@@ -1554,15 +1598,17 @@ def main():
                                     if ln.strip().startswith(("Given","When","Scenario","Then","-"))
                                 ))
                                 # Snapshot mutable values for the thread closure
-                                _sav_url_val  = sav_url.strip()
-                                _card_id_val  = card.id
+                                _sav_url_val   = sav_url.strip()
+                                _card_id_val   = card.id
                                 _card_name_val = card.name
-                                _card_url_val = card.url
-                                _sav_qa_copy  = dict(sav_qa) if sav_qa else {}
-                                _rk = _sav_result_key
-                                _pk = _sav_prog_key
-                                _sk = _sav_stop_key
+                                _card_url_val  = card.url
+                                _sav_qa_copy   = dict(sav_qa) if sav_qa else {}
+                                _rk  = _sav_result_key
+                                _pk  = _sav_prog_key
+                                _sk  = _sav_stop_key
                                 _max_sc = st.session_state.get(_complexity_key)
+                                _sh_email = st.session_state.get("shopify_email", "")
+                                _sh_pass  = st.session_state.get("shopify_password", "")
 
                                 def _sav_progress_cb(
                                     sc_idx, sc_title, step_num, step_desc,
@@ -1581,6 +1627,7 @@ def main():
                                     _url=_sav_url_val, _ac=_ac_text, _cname=_card_name_val,
                                     _cid=_card_id_val, _curl=_card_url_val, _qa=_sav_qa_copy,
                                     _rk2=_rk, _sk2=_sk, _max=_max_sc,
+                                    _email=_sh_email, _password=_sh_pass,
                                 ):
                                     try:
                                         report = _verify_ac_fn(
@@ -1595,6 +1642,8 @@ def main():
                                             auto_report_bugs=True,
                                             stop_flag=lambda: st.session_state.get(_sk2, False),
                                             max_scenarios=_max,
+                                            shopify_email=_email,
+                                            shopify_password=_password,
                                         )
                                         st.session_state[_rk2] = {"done": True, "report": report, "error": None}
                                     except Exception as _ex:

@@ -2016,6 +2016,71 @@ def _verify_scenario(
     return result
 
 
+# ── Shopify auto-login helper ─────────────────────────────────────────────────
+
+def _shopify_login(page, email: str, password: str, app_url: str) -> bool:
+    """
+    Log into Shopify admin using email + password, save the session to auth.json,
+    and navigate to app_url.  Returns True on success, False on failure.
+    """
+    try:
+        logger.info("SmartVerifier: auth.json missing — attempting Shopify login with %s", email)
+        page.goto("https://accounts.shopify.com/login", wait_until="domcontentloaded", timeout=20_000)
+        page.wait_for_timeout(1500)
+
+        # Fill email
+        email_sel = "input[type='email'], input[name='email'], input[id*='email']"
+        page.wait_for_selector(email_sel, timeout=10_000)
+        page.fill(email_sel, email)
+
+        # Click Continue / Next
+        for btn in ["button[type='submit']", "button:has-text('Continue')", "button:has-text('Next')"]:
+            try:
+                page.click(btn, timeout=3_000)
+                break
+            except Exception:
+                pass
+        page.wait_for_timeout(2000)
+
+        # Fill password (may appear on next screen)
+        pass_sel = "input[type='password'], input[name='password'], input[id*='password']"
+        try:
+            page.wait_for_selector(pass_sel, timeout=8_000)
+            page.fill(pass_sel, password)
+            for btn in ["button[type='submit']", "button:has-text('Log in')", "button:has-text('Sign in')"]:
+                try:
+                    page.click(btn, timeout=3_000)
+                    break
+                except Exception:
+                    pass
+        except Exception:
+            pass  # password field not shown (e.g. SSO redirect)
+
+        page.wait_for_timeout(4000)
+
+        # Save session state to auth.json so subsequent runs skip login
+        current_url = page.url
+        if "login" not in current_url and "accounts.shopify" not in current_url:
+            page.context.storage_state(path=str(_AUTH_JSON))
+            logger.info("SmartVerifier: login successful — auth.json saved")
+            return True
+
+        # Navigate to the app URL and check again
+        page.goto(app_url, wait_until="domcontentloaded", timeout=20_000)
+        page.wait_for_timeout(3000)
+        if "login" not in page.url:
+            page.context.storage_state(path=str(_AUTH_JSON))
+            logger.info("SmartVerifier: login successful (via app_url) — auth.json saved")
+            return True
+
+        logger.warning("SmartVerifier: login may have failed — still on %s", page.url)
+        return False
+
+    except Exception as exc:
+        logger.warning("SmartVerifier: auto-login failed: %s", exc)
+        return False
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def verify_ac(
@@ -2030,6 +2095,8 @@ def verify_ac(
     auto_report_bugs: bool = True,
     stop_flag: "Callable[[], bool] | None" = None,
     max_scenarios: int | None = None,
+    shopify_email: str = "",
+    shopify_password: str = "",
 ) -> VerificationReport:
     """
     Verify AC scenarios for a card against the live AU Post Shopify app.
@@ -2045,11 +2112,19 @@ def verify_ac(
         qa_answers:        {scenario_text: qa_answer} for stuck scenarios
         auto_report_bugs:  If True, automatically DM developers when a bug is found
         max_scenarios:     Cap number of scenarios tested (None = test all).
+        shopify_email:     Shopify admin email — used to auto-login if auth.json is missing.
+        shopify_password:  Shopify admin password — used to auto-login if auth.json is missing.
 
     Returns:
         VerificationReport with per-scenario results + bug_report on failures
     """
     from playwright.sync_api import sync_playwright
+
+    # Fall back to env vars for credentials if not explicitly passed
+    if not shopify_email:
+        shopify_email = os.getenv("USER_EMAIL", "")
+    if not shopify_password:
+        shopify_password = os.getenv("USER_PASSWORD", "")
 
     if not app_url:
         app_url = get_auto_app_url()
@@ -2086,7 +2161,15 @@ def verify_ac(
             logger.warning("Chrome not found (%s) — falling back to headless Chromium", e)
             browser = p.chromium.launch(headless=True, args=_ANTI_BOT_ARGS)
 
-        ctx  = browser.new_context(**_auth_ctx_kwargs())
+        # ── Auth: prefer saved session; fall back to credential-based login ──
+        ctx = browser.new_context(**_auth_ctx_kwargs())
+        if not _AUTH_JSON.exists() and shopify_email and shopify_password:
+            _login_page = ctx.new_page()
+            _shopify_login(_login_page, shopify_email, shopify_password, app_url)
+            _login_page.close()
+            # Reload context with the newly saved auth.json
+            ctx.close()
+            ctx = browser.new_context(**_auth_ctx_kwargs())
         page = ctx.new_page()
 
         for idx, scenario in enumerate(scenarios):
