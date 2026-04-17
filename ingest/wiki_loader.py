@@ -59,11 +59,11 @@ def load_wiki_docs() -> list[Document]:
 
     Returns an empty list (with a warning) if the wiki directory doesn't exist.
     """
-    wiki_root = Path(config.WIKI_PATH)
-    if not wiki_root.exists():
+    wiki_root = Path(config.WIKI_PATH) if config.WIKI_PATH else None
+    if not wiki_root or not wiki_root.exists():
         logger.warning(
-            "Wiki path does not exist: %s — skipping wiki ingestion. "
-            "Set WIKI_PATH env var to the aupost-wiki directory.",
+            "Wiki path does not exist or is not set: %s — skipping wiki ingestion. "
+            "Set AUPOST_WIKI env var to the aupost-wiki directory.",
             wiki_root,
         )
         return []

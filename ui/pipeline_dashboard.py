@@ -356,9 +356,15 @@ def main():
     # ── Force-initialize code paths from config on first load of each session
     if "code_paths_initialized" not in st.session_state:
         if config.BACKEND_CODE_PATH:
-            st.session_state["be_repo_path"] = config.BACKEND_CODE_PATH
+            st.session_state["be_repo_path"]        = config.BACKEND_CODE_PATH
+            st.session_state["backend_code_path"]   = config.BACKEND_CODE_PATH
         if config.FRONTEND_CODE_PATH:
-            st.session_state["fe_repo_path"] = config.FRONTEND_CODE_PATH
+            st.session_state["fe_repo_path"]        = config.FRONTEND_CODE_PATH
+            st.session_state["frontend_code_path"]  = config.FRONTEND_CODE_PATH
+        if config.AUTOMATION_CODEBASE_PATH:
+            st.session_state["automation_code_path"] = config.AUTOMATION_CODEBASE_PATH
+        if config.WIKI_PATH:
+            st.session_state["wiki_path"] = config.WIKI_PATH
         st.session_state["code_paths_initialized"] = True
 
     # ── Connection status (computed once, used in sidebar + body) ──────────

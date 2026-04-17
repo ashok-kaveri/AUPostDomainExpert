@@ -26,7 +26,9 @@ CHROMA_COLLECTION = "aupost_knowledge"
 CHROMA_CODE_COLLECTION = "aupost_code_knowledge"
 
 # Source code paths (set via .env or indexed via the dashboard)
+# Backend: shopify-australia-post-app  (Node/TS backend)
 BACKEND_CODE_PATH  = os.getenv("BACKEND_CODE_PATH", "")
+# Frontend: shopify-au-post-web-client  (React/TS frontend)
 FRONTEND_CODE_PATH = os.getenv("FRONTEND_CODE_PATH", "")
 
 # File extensions to index from source code directories
@@ -63,7 +65,8 @@ AUTOMATION_CODEBASE_PATH = os.getenv(
 AUPOST_APP_SLUG = os.getenv("AUPOST_APP_SLUG", "australia-post-rates-labels")
 
 # Internal AU Post wiki (markdown knowledge base)
-WIKI_PATH = os.getenv("WIKI_PATH", "")
+# Reads AUPOST_WIKI first, falls back to WIKI_PATH for backwards compatibility
+WIKI_PATH = os.getenv("AUPOST_WIKI") or os.getenv("WIKI_PATH", "")
 
 # Google Sheets — AU Post test cases
 # eParcel test cases sheet
