@@ -2,9 +2,9 @@
 generate_detailed_report.py
 ---------------------------
 Generates a detailed QA / Training report PDF for any Trello card.
-Matches the style of Detailed_Report.pdf (FedEx reference):
+Structure:
 
-  Cover → Section 1 (Promo Pitch) → Section 2 (Training + Test Cases)
+  Cover → Section 1 (Training Material + How-To Steps + Test Cases)
         → Sign-Off Checklist → QA Notes
 
 Uses Claude to build the content from card description / AC.
@@ -136,34 +136,19 @@ Return ONLY valid JSON (no markdown, no fences) with this exact structure:
   "feature_name": "Short feature title (3-6 words)",
   "version": "v1.0.0",
   "tagline": "One sentence — what the feature does for the merchant (max 130 chars)",
-  "problem_intro": "2-3 sentence paragraph describing the merchant pain this feature solves",
-  "pain_points": [
-    {{"icon": "SLOW|SEARCH|TRACK|FILTER|RISK|GAP", "text": "One-sentence business impact"}}
-  ],
-  "solution_features": [
-    {{
-      "label": "ALL-CAPS badge (max 12 chars)",
-      "heading": "Feature Name (3-5 words)",
-      "desc": "1-2 sentences describing exactly what this feature/filter does"
-    }}
-  ],
-  "benefits": [
-    {{"label": "ALL-CAPS keyword (max 12 chars)", "detail": "One sentence"}}
-  ],
-  "user_story": "As a merchant using the AU Post Shopify App, I want to [do X] so that [Y].",
   "how_to_steps": [
     {{"step": "Short action label", "detail": "One sentence telling QA/support how to do it"}}
   ],
   "date_presets": [],
   "test_cases": [
     {{
-      "group_label": "Filter / Category name",
+      "group_label": "Filter / Category name  (e.g. 'Order ID Filter')",
       "group_color_hex": "#6A0DAD",
       "cases": [
         {{
           "num": 1,
-          "description": "Test case title (concise)",
-          "expected": "Expected result (concise)",
+          "description": "Filter by [Type] — specific scenario (e.g. 'Filter by Order ID — Single valid order ID entered')",
+          "expected": "Specific observable outcome (e.g. 'Exact matching order displayed in the grid')",
           "status": "PASS"
         }}
       ]
@@ -178,13 +163,24 @@ Return ONLY valid JSON (no markdown, no fences) with this exact structure:
 }}
 
 Rules:
-- pain_points: 3-5 items
-- solution_features: one per AC acceptance criterion (group related ones)
-- benefits: 5-7 items (SPEED, PRECISION, CONTINUITY, RESET, PERFORMANCE, SAFETY, etc.)
 - how_to_steps: 5-8 numbered steps for QA / support staff
 - date_presets: include ONLY if the feature involves date filtering; otherwise empty list []
   If included: [{{"name": "Today|Yesterday|Last 7 Days|Last Month|Custom Range", "desc": "..."}}]
-- test_cases: derive from the AC — one group per major filter/feature area, 2-5 cases per group
+- test_cases: derive from the AC — one group per major filter/feature area, 3-5 cases per group
+  IMPORTANT: Each case description MUST follow the pattern "[Feature/Filter] — [specific scenario]"
+  Examples:
+    "Filter by Order ID — Single valid order ID entered"
+    "Filter by Order ID — Partial ID e.g. '#145'"
+    "Filter by Order ID — Invalid / non-existent ID"
+    "Filter by Customer Name — Exact full name entered"
+    "Filter by Customer Name — Partial name search"
+    "Filter by Date — Preset 'Last 7 Days' selected"
+    "Filter by Date — Custom date range spanning multiple months"
+    "Filter by Status — Single status filter applied"
+    "Filter by Status — Multiple statuses selected simultaneously"
+    "Combination Filter — Two or more filters applied together"
+    "Reset Filters — Clear all active filters"
+  Each expected result must be a specific, observable UI/system behaviour — not generic.
   All statuses should be "PASS" unless you have reason to believe otherwise
 - ac_checklist: one entry per acceptance criterion bullet from the card
 - qa_notes: 2-4 notes about the card, Trello link, video reference placeholder, regression notes
@@ -415,8 +411,8 @@ def _section_promo(content: dict) -> list:
 
 # ── Section 2: Training Material ──────────────────────────────────────────────
 def _section_training(content: dict, sav_report) -> list:
-    elems = [PageBreak()]
-    elems += _section_chip(2, "Training Material", "Step-by-step guide for QA engineers and support staff")
+    elems = []
+    elems += _section_chip(1, "Training Material", "Step-by-step guide for QA engineers and support staff")
 
     # How-to steps
     elems += _subsec_head("How to Access & Use This Feature")
@@ -658,7 +654,6 @@ def generate_detailed_report(
     story = (
         _cover(content, card_id, card_url, date_str)
         + [_sp(0.8)]
-        + _section_promo(content)
         + _section_training(content, sav_report)
     )
     on_page = _make_on_page(content["feature_name"], date_str)
