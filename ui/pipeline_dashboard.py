@@ -1849,157 +1849,141 @@ def main():
                             "Claude reads the description and AC to build the document content automatically."
                         )
 
-                        _doc_col1, _doc_col2 = st.columns(2)
+                        # Capture card-level values for fragment closure
+                        _doc_card_id   = card.id
+                        _doc_card_name = card.name
+                        _doc_card_desc = card.desc or ""
+                        _doc_card_url  = card.url or ""
 
-                        # ── Business Pitch ────────────────────────────────
-                        with _doc_col1:
-                            _biz_key        = f"biz_pitch_{card.id}"
-                            _biz_run_key    = f"biz_pitch_running_{card.id}"
-                            _biz_result_key = f"biz_pitch_result_{card.id}"
+                        @st.fragment(run_every=2)
+                        def _doc_gen_fragment(
+                            card_id=_doc_card_id,
+                            card_name=_doc_card_name,
+                            card_desc=_doc_card_desc,
+                            card_url=_doc_card_url,
+                        ):
+                            _biz_key        = f"biz_pitch_{card_id}"
+                            _biz_run_key    = f"biz_pitch_running_{card_id}"
+                            _biz_result_key = f"biz_pitch_result_{card_id}"
+                            _det_key        = f"det_report_{card_id}"
+                            _det_run_key    = f"det_report_running_{card_id}"
+                            _det_result_key = f"det_report_result_{card_id}"
 
                             _biz_is_running = st.session_state.get(_biz_run_key, False)
                             _biz_result     = st.session_state.get(_biz_result_key, {})
-
-                            if _biz_is_running:
-                                if _biz_result.get("done"):
-                                    # Thread finished — harvest and show result
-                                    st.session_state[_biz_run_key] = False
-                                    if _biz_result.get("error"):
-                                        st.error(f"❌ {_biz_result['error']}")
-                                    else:
-                                        st.session_state[_biz_key] = _biz_result["path"]
-                                    st.session_state.pop(_biz_result_key, None)
-                                    st.rerun()
-                                else:
-                                    # Still running — static message + manual refresh
-                                    st.button("⏳ Generating Business Doc…", key=f"biz_busy_{card.id}",
-                                              use_container_width=True, disabled=True)
-                                    st.caption("✍️ Claude is writing content in the background…")
-                                    if st.button("🔄 Check if ready", key=f"biz_check_{card.id}",
-                                                 use_container_width=True):
-                                        st.rerun()
-                            elif st.button(
-                                "📄 Generate Business Document",
-                                key=f"gen_biz_{card.id}",
-                                use_container_width=True,
-                                help="Business pitch PDF — merchant scenarios, benefits, problem statement",
-                            ):
-                                _biz_card_name = card.name
-                                _biz_card_desc = card.desc or ""
-                                _biz_card_id   = card.id
-                                _biz_card_url  = card.url or ""
-                                _biz_rk        = _biz_result_key
-
-                                def _run_biz_thread(
-                                    _cn=_biz_card_name, _cd=_biz_card_desc,
-                                    _ci=_biz_card_id, _cu=_biz_card_url, _rk=_biz_rk,
-                                ):
-                                    try:
-                                        from pipeline.generate_business_pitch import generate_business_pitch as _gen_biz
-                                        path = _gen_biz(
-                                            card_name=_cn, card_desc=_cd,
-                                            card_id=_ci, card_url=_cu,
-                                        )
-                                        st.session_state[_rk] = {"done": True, "path": path, "error": None}
-                                    except Exception as _ex:
-                                        st.session_state[_rk] = {"done": True, "path": None, "error": str(_ex)}
-
-                                st.session_state[_biz_run_key]    = True
-                                st.session_state[_biz_result_key] = {"done": False}
-                                threading.Thread(target=_run_biz_thread, daemon=True).start()
-                                st.rerun()
-
-                            # Show download button if PDF is ready
-                            _biz_path = st.session_state.get(_biz_key)
-                            if _biz_path and Path(_biz_path).exists():
-                                st.success("✅ Business Pitch ready")
-                                with open(_biz_path, "rb") as _bf:
-                                    st.download_button(
-                                        "⬇️ Download Business Pitch PDF",
-                                        data=_bf.read(),
-                                        file_name=Path(_biz_path).name,
-                                        mime="application/pdf",
-                                        key=f"dl_biz_{card.id}",
-                                        use_container_width=True,
-                                    )
-                                st.caption(f"📁 `{_biz_path}`")
-
-                        # ── Detailed Report ───────────────────────────────
-                        with _doc_col2:
-                            _det_key        = f"det_report_{card.id}"
-                            _det_run_key    = f"det_report_running_{card.id}"
-                            _det_result_key = f"det_report_result_{card.id}"
-
                             _det_is_running = st.session_state.get(_det_run_key, False)
                             _det_result     = st.session_state.get(_det_result_key, {})
 
-                            if _det_is_running:
-                                if _det_result.get("done"):
-                                    # Thread finished — harvest and show result
-                                    st.session_state[_det_run_key] = False
-                                    if _det_result.get("error"):
-                                        st.error(f"❌ {_det_result['error']}")
-                                    else:
-                                        st.session_state[_det_key] = _det_result["path"]
-                                    st.session_state.pop(_det_result_key, None)
-                                    st.rerun()
-                                else:
-                                    # Still running — static message + manual refresh
-                                    st.button("⏳ Generating Detailed Report…", key=f"det_busy_{card.id}",
-                                              use_container_width=True, disabled=True)
-                                    st.caption("✍️ Claude is writing content in the background…")
-                                    if st.button("🔄 Check if ready", key=f"det_check_{card.id}",
-                                                 use_container_width=True):
-                                        st.rerun()
-                            elif st.button(
-                                "📊 Generate Detailed Report",
-                                key=f"gen_det_{card.id}",
-                                use_container_width=True,
-                                help="Full QA report — training guide, all test cases, AC sign-off, QA notes",
-                            ):
-                                _det_card_name  = card.name
-                                _det_card_desc  = card.desc or ""
-                                _det_card_id    = card.id
-                                _det_card_url   = card.url or ""
-                                _det_sav_report = st.session_state.get(f"sav_report_{card.id}")
-                                _det_rk         = _det_result_key
+                            # Harvest finished threads
+                            if _biz_is_running and _biz_result.get("done"):
+                                st.session_state[_biz_run_key] = False
+                                if not _biz_result.get("error"):
+                                    st.session_state[_biz_key] = _biz_result["path"]
+                                st.session_state.pop(_biz_result_key, None)
+                                _biz_is_running = False
 
-                                def _run_det_thread(
-                                    _cn=_det_card_name, _cd=_det_card_desc,
-                                    _ci=_det_card_id, _cu=_det_card_url,
-                                    _sr=_det_sav_report, _rk=_det_rk,
-                                ):
-                                    try:
-                                        from pipeline.generate_detailed_report import generate_detailed_report as _gen_det
-                                        path = _gen_det(
-                                            card_name=_cn, card_desc=_cd,
-                                            card_id=_ci, card_url=_cu,
-                                            sav_report=_sr,
+                            if _det_is_running and _det_result.get("done"):
+                                st.session_state[_det_run_key] = False
+                                if not _det_result.get("error"):
+                                    st.session_state[_det_key] = _det_result["path"]
+                                st.session_state.pop(_det_result_key, None)
+                                _det_is_running = False
+
+                            _col1, _col2 = st.columns(2)
+
+                            # ── Business Pitch col ────────────────────────
+                            with _col1:
+                                _biz_path = st.session_state.get(_biz_key)
+                                if _biz_path and Path(_biz_path).exists():
+                                    # Done — show download
+                                    st.success("✅ Business Pitch ready")
+                                    with open(_biz_path, "rb") as _bf:
+                                        st.download_button(
+                                            "⬇️ Download Business Pitch PDF",
+                                            data=_bf.read(),
+                                            file_name=Path(_biz_path).name,
+                                            mime="application/pdf",
+                                            key=f"dl_biz_{card_id}",
+                                            use_container_width=True,
                                         )
-                                        st.session_state[_rk] = {"done": True, "path": path, "error": None}
-                                    except Exception as _ex:
-                                        st.session_state[_rk] = {"done": True, "path": None, "error": str(_ex)}
-
-                                st.session_state[_det_run_key]    = True
-                                st.session_state[_det_result_key] = {"done": False}
-                                threading.Thread(target=_run_det_thread, daemon=True).start()
-                                st.rerun()
-
-                            # Show download button if PDF is ready
-                            _det_path = st.session_state.get(_det_key)
-                            if _det_path and Path(_det_path).exists():
-                                _sav_note = " (with SAV results)" if st.session_state.get(f"sav_report_{card.id}") else ""
-                                st.success(f"✅ Detailed Report ready{_sav_note}")
-                                with open(_det_path, "rb") as _df:
-                                    st.download_button(
-                                        "⬇️ Download Detailed Report PDF",
-                                        data=_df.read(),
-                                        file_name=Path(_det_path).name,
-                                        mime="application/pdf",
-                                        key=f"dl_det_{card.id}",
+                                    st.caption(f"📁 `{_biz_path}`")
+                                elif _biz_is_running:
+                                    # Running — show animated progress bar + message
+                                    st.button("⏳ Generating Business Doc…", key=f"biz_busy_{card_id}",
+                                              use_container_width=True, disabled=True)
+                                    st.progress(0.0, text="✍️ Claude is generating content… auto-refreshing every 2s")
+                                    if st.session_state.get(f"biz_pitch_result_{card_id}", {}).get("error"):
+                                        st.error(f"❌ {st.session_state[_biz_result_key]['error']}")
+                                else:
+                                    if st.button(
+                                        "📄 Generate Business Document",
+                                        key=f"gen_biz_{card_id}",
                                         use_container_width=True,
-                                    )
-                                st.caption(f"📁 `{_det_path}`")
+                                        help="Business pitch PDF — merchant scenarios, benefits, problem statement",
+                                    ):
+                                        _rk = _biz_result_key
+                                        def _run_biz(_cn=card_name, _cd=card_desc,
+                                                     _ci=card_id, _cu=card_url, _rk=_rk):
+                                            try:
+                                                from pipeline.generate_business_pitch import generate_business_pitch as _g
+                                                p = _g(card_name=_cn, card_desc=_cd, card_id=_ci, card_url=_cu)
+                                                st.session_state[_rk] = {"done": True, "path": p, "error": None}
+                                            except Exception as _e:
+                                                st.session_state[_rk] = {"done": True, "path": None, "error": str(_e)}
+                                        st.session_state[_biz_run_key]    = True
+                                        st.session_state[_biz_result_key] = {"done": False}
+                                        threading.Thread(target=_run_biz, daemon=True).start()
+                                        st.rerun()
+
+                            # ── Detailed Report col ───────────────────────
+                            with _col2:
+                                _det_path = st.session_state.get(_det_key)
+                                if _det_path and Path(_det_path).exists():
+                                    # Done — show download
+                                    _sav_note = " (with SAV results)" if st.session_state.get(f"sav_report_{card_id}") else ""
+                                    st.success(f"✅ Detailed Report ready{_sav_note}")
+                                    with open(_det_path, "rb") as _df:
+                                        st.download_button(
+                                            "⬇️ Download Detailed Report PDF",
+                                            data=_df.read(),
+                                            file_name=Path(_det_path).name,
+                                            mime="application/pdf",
+                                            key=f"dl_det_{card_id}",
+                                            use_container_width=True,
+                                        )
+                                    st.caption(f"📁 `{_det_path}`")
+                                elif _det_is_running:
+                                    # Running — show animated progress bar + message
+                                    st.button("⏳ Generating Detailed Report…", key=f"det_busy_{card_id}",
+                                              use_container_width=True, disabled=True)
+                                    st.progress(0.0, text="✍️ Claude is generating content… auto-refreshing every 2s")
+                                    if st.session_state.get(f"det_report_result_{card_id}", {}).get("error"):
+                                        st.error(f"❌ {st.session_state[_det_result_key]['error']}")
+                                else:
+                                    if st.button(
+                                        "📊 Generate Detailed Report",
+                                        key=f"gen_det_{card_id}",
+                                        use_container_width=True,
+                                        help="Full QA report — training guide, all test cases, AC sign-off, QA notes",
+                                    ):
+                                        _sav_snap = st.session_state.get(f"sav_report_{card_id}")
+                                        _rk = _det_result_key
+                                        def _run_det(_cn=card_name, _cd=card_desc,
+                                                     _ci=card_id, _cu=card_url,
+                                                     _sr=_sav_snap, _rk=_rk):
+                                            try:
+                                                from pipeline.generate_detailed_report import generate_detailed_report as _g
+                                                p = _g(card_name=_cn, card_desc=_cd, card_id=_ci,
+                                                       card_url=_cu, sav_report=_sr)
+                                                st.session_state[_rk] = {"done": True, "path": p, "error": None}
+                                            except Exception as _e:
+                                                st.session_state[_rk] = {"done": True, "path": None, "error": str(_e)}
+                                        st.session_state[_det_run_key]    = True
+                                        st.session_state[_det_result_key] = {"done": False}
+                                        threading.Thread(target=_run_det, daemon=True).start()
+                                        st.rerun()
+
+                        _doc_gen_fragment()
 
                         st.divider()
 
