@@ -205,7 +205,7 @@ def _generate_content(card_name: str, card_desc: str, card_id: str, card_url: st
         card_url=card_url or "",
     )
     resp = client.messages.create(
-        model=config.CLAUDE_SONNET_MODEL,
+        model=config.CLAUDE_HAIKU_MODEL,
         max_tokens=6000,
         messages=[{"role": "user", "content": prompt}],
     )
