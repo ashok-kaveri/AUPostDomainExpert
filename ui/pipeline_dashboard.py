@@ -2951,9 +2951,16 @@ def main():
                                         def _on_fix_progress(iteration, status, output, _ph=fix_status_placeholder):
                                             _ph.info(f"🔄 **Auto-fix iteration {iteration}/3** — {status}")
                                         with st.spinner(label):
+                                            _tc_md = tc_store.get(card.id, "")
+                                            if not _tc_md:
+                                                # Session was reloaded — recover TCs from Trello comment
+                                                _tc_md = next(
+                                                    (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                                                    ""
+                                                )
                                             result = write_automation(
                                                 card_name=card.name,
-                                                test_cases_markdown=tc_store.get(card.id, ""),
+                                                test_cases_markdown=_tc_md,
                                                 acceptance_criteria=card.desc or "",
                                                 branch_name=auto_branch_input,
                                                 dry_run=dry_auto,
