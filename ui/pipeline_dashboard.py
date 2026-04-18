@@ -3067,17 +3067,27 @@ def main():
                     key="run_scope",
                 )
 
+                release_only = run_scope.startswith("This")
+                no_specs_warning = release_only and n_with_spec == 0
+
+                if no_specs_warning:
+                    st.warning(
+                        "⚠️ No spec files generated yet for this release. "
+                        "Complete **Step 5 — Write Automation Code** for at least one card first, "
+                        "or switch scope to **Full test suite**."
+                    )
+
                 col_run, col_slack_only = st.columns([2, 1])
                 with col_run:
-                    run_disabled = n_approved == 0
+                    run_disabled = n_approved == 0 or no_specs_warning
                     if st.button(
-                        "▶️ Run Tests" + (f" ({n_with_spec} specs)" if run_scope.startswith("This") and n_with_spec else ""),
+                        "▶️ Run Tests" + (f" ({n_with_spec} specs)" if release_only and n_with_spec else ""),
                         type="primary",
                         use_container_width=True,
                         disabled=run_disabled,
                         key="run_tests_btn",
                     ):
-                        specs_to_run = all_specs if run_scope.startswith("This") else []
+                        specs_to_run = all_specs if release_only else []
                         with st.spinner(f"Running Playwright tests… ({len(specs_to_run) or 'full suite'})"):
                             run_result = run_release_tests(
                                 release=current_release,
