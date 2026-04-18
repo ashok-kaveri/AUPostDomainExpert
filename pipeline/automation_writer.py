@@ -619,33 +619,68 @@ def filter_automatable_cases(test_cases_markdown: str) -> tuple[str, dict]:
       - Negative  → EXCLUDED         (require error mocking / invalid API
                                       responses — belong in manual / contract tests)
 
+    Handles two input formats:
+      1. Raw generated format:  ### TC-N: Title / **Type:** Positive|Negative|Edge
+      2. Trello comment format: ✅ Positive / ❌ Negative sections with • TC-N: bullets
+
     Returns:
         filtered_markdown:  Only the Positive + Edge TC blocks joined back together
         summary:            {'total': n, 'positive': n, 'edge': n, 'negative': n, 'kept': n}
     """
     import re as _re
 
-    blocks = _re.split(r"(?=###\s+TC-\d+)", test_cases_markdown)
     kept: list[str] = []
     counts = {"total": 0, "positive": 0, "edge": 0, "negative": 0}
 
-    for block in blocks:
-        block = block.strip()
-        if not block or not _re.match(r"###\s+TC-\d+", block):
-            continue
-        counts["total"] += 1
-        type_match = _re.search(r"\*\*Type:\*\*\s*(Positive|Negative|Edge)", block, _re.IGNORECASE)
-        tc_type = type_match.group(1).capitalize() if type_match else "Positive"
+    # ── Format 1: raw ### TC-N blocks ─────────────────────────────────────────
+    blocks = _re.split(r"(?=###\s+TC-\d+)", test_cases_markdown)
+    structured_blocks = [b.strip() for b in blocks if b.strip() and _re.match(r"###\s+TC-\d+", b.strip())]
 
-        if tc_type == "Negative":
-            counts["negative"] += 1
-            # Skip — negative cases require error mocking, not suitable for E2E automation
-        elif tc_type == "Edge":
-            counts["edge"] += 1
-            kept.append(block)
-        else:
-            counts["positive"] += 1
-            kept.append(block)
+    if structured_blocks:
+        for block in structured_blocks:
+            counts["total"] += 1
+            type_match = _re.search(r"\*\*Type:\*\*\s*(Positive|Negative|Edge)", block, _re.IGNORECASE)
+            tc_type = type_match.group(1).capitalize() if type_match else "Positive"
+
+            if tc_type == "Negative":
+                counts["negative"] += 1
+            elif tc_type == "Edge":
+                counts["edge"] += 1
+                kept.append(block)
+            else:
+                counts["positive"] += 1
+                kept.append(block)
+
+    else:
+        # ── Format 2: Trello comment format ───────────────────────────────────
+        # Section headers (bold): **✅ Positive**, **❌ Negative**, **⚠️ Edge**
+        # TC bullets: • TC-N: Title — expected result
+        current_type = "Positive"
+        for line in test_cases_markdown.splitlines():
+            stripped = line.strip().strip("*").strip()  # remove bold markers
+            if _re.search(r"\bPositive\b", stripped, _re.IGNORECASE) and len(stripped) < 40:
+                current_type = "Positive"
+                continue
+            elif _re.search(r"\bNegative\b", stripped, _re.IGNORECASE) and len(stripped) < 40:
+                current_type = "Negative"
+                continue
+            elif _re.search(r"\bEdge\b", stripped, _re.IGNORECASE) and len(stripped) < 40:
+                current_type = "Edge"
+                continue
+
+            # Bullet TC lines: "• TC-N: title — description"
+            tc_match = _re.match(r"[•\-\*]\s*(TC-\d+.+)", line.strip())
+            if tc_match:
+                counts["total"] += 1
+                tc_text = tc_match.group(1).strip()
+                if current_type == "Negative":
+                    counts["negative"] += 1
+                elif current_type == "Edge":
+                    counts["edge"] += 1
+                    kept.append(tc_text)
+                else:
+                    counts["positive"] += 1
+                    kept.append(tc_text)
 
     counts["kept"] = len(kept)
     filtered = "\n\n".join(kept)
