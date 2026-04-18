@@ -1522,15 +1522,13 @@ def main():
                         st.session_state[_complexity_key] = _COMPLEXITY_MAP[_complexity_choice]
                         st.session_state[_complexity_key + "_idx"] = list(_COMPLEXITY_MAP.keys()).index(_complexity_choice)
 
+                        sav_url = _global_url_override or _auto_url
                         col_sav1, col_sav2 = st.columns([2, 3])
                         with col_sav2:
-                            sav_url = st.text_input(
-                                "App URL",
-                                value=_global_url_override or _auto_url,
-                                placeholder="https://admin.shopify.com/store/yourstore/apps/testing-553",
-                                key=f"sav_url_{card.id}",
-                                label_visibility="collapsed",
-                            )
+                            if sav_url:
+                                st.caption(f"🌐 `{sav_url}`")
+                            else:
+                                st.caption("⚠️ No URL set — open App URL & Login Credentials above")
                         with col_sav1:
                             _sav_running_key  = f"sav_running_{card.id}"
                             _sav_stop_key     = f"sav_stop_{card.id}"
