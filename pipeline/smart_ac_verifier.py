@@ -795,7 +795,10 @@ def _ax_tree(page) -> str:
     """
     Accessibility tree as readable text.
     Captures BOTH the main Shopify page AND the AU Post app iframe.
+    Uses a 10s thread timeout per snapshot so large pages never hang.
     """
+    import concurrent.futures as _cf
+
     lines: list[str] = []
 
     def _walk(n: dict, d: int = 0, prefix: str = "") -> None:
@@ -815,9 +818,17 @@ def _ax_tree(page) -> str:
         for ch in n.get("children", []):
             _walk(ch, d + 1, prefix)
 
+    def _snapshot_with_timeout(fn, timeout=10):
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(fn)
+            try:
+                return fut.result(timeout=timeout)
+            except (_cf.TimeoutError, Exception):
+                return None
+
     # 1. Main page (Shopify admin chrome)
     try:
-        ax = page.accessibility.snapshot(interesting_only=True)
+        ax = _snapshot_with_timeout(lambda: page.accessibility.snapshot(interesting_only=True))
         if ax:
             _walk(ax)
     except Exception as e:
@@ -833,7 +844,9 @@ def _ax_tree(page) -> str:
                                  and "apps" not in frame_url):
                 continue
             try:
-                frame_ax = frame.accessibility.snapshot(interesting_only=True)
+                frame_ax = _snapshot_with_timeout(
+                    lambda f=frame: f.accessibility.snapshot(interesting_only=True)
+                )
                 if frame_ax:
                     lines.append(f"\n--- [APP IFRAME: {frame_url[:60]}] ---")
                     _walk(frame_ax, prefix="")
@@ -2141,6 +2154,7 @@ def verify_ac(
         api_key=config.ANTHROPIC_API_KEY,
         temperature=0.1,
         max_tokens=4096,
+        timeout=90,
     )
 
     report    = VerificationReport(card_name=card_name, app_url=app_url)
@@ -2295,6 +2309,7 @@ def reverify_failed(
         api_key=config.ANTHROPIC_API_KEY,
         temperature=0.1,
         max_tokens=4096,
+        timeout=90,
     )
 
     card_name    = report.card_name
