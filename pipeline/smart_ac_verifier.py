@@ -286,6 +286,37 @@ STEP 2 — Generate label on fresh order and verify JSON:
   → Verify via Download Documents ZIP (Strategy 2)
 
 ─────────────────────────────────────────────────────────
+SCENARIO GROUP: Auto-Generate Label (from Shopify Admin)
+(keywords: "auto generate label", "auto-generate label", "generate auto label",
+ "auto label", "automatically generate")
+─────────────────────────────────────────────────────────
+order_action = create_new  (verifier creates a fresh Shopify order via API BEFORE browser opens)
+nav_clicks: ["Orders"]  (Shopify admin Orders page — admin.shopify.com/store/.../orders)
+
+STEP 1 — Find and open the fresh order:
+  The fresh order created by the verifier is the MOST RECENT order at the top of the list.
+  The order context above names it (e.g. "Order #1234").
+  → Look at the orders list and click the most recent order row.
+  → You are now on the Shopify order DETAIL page (NOT the AU Post app).
+
+STEP 2 — Auto-generate the label:
+  → On the order detail page, click "More Actions" button (top-right area, OUTSIDE any iframe)
+  → You will see a dropdown menu — click "Auto-Generate Label"
+  → Wait for the AU Post app to process the label (a spinner or redirect may appear)
+  → The page may redirect or show a success message.
+
+STEP 3 — Verify label was generated:
+  Strategy A: navigate back to AU Post app Shipping page (action=navigate, path="shopify")
+    → Find the order in the grid → verify "label generated" status badge is green.
+  Strategy B: stay on Shopify order page, observe for any label confirmation UI.
+  → action=verify with verdict based on what you see.
+
+⚠️ "Auto-Generate Label" vs "Generate Label":
+  - "Auto-Generate Label" → AU Post picks service automatically, generates immediately
+  - "Generate Label" → opens manual label flow (user picks service/package)
+  Both are in More Actions on the Shopify order detail page (OUTSIDE the app iframe).
+
+─────────────────────────────────────────────────────────
 SCENARIO GROUP C — No Label Needed
 ─────────────────────────────────────────────────────────
 - "Settings only" → App sidebar → Settings → configure → verify
@@ -524,6 +555,9 @@ _WG_CONDITIONAL: list[tuple[list[str], str]] = [
     (["product dimension", "product weight", "product config", "appproducts",
       "dimensions on product", "product length", "product width"],
      "SCENARIO GROUP B"),
+    (["auto generate label", "auto-generate label", "generate auto label",
+      "auto label", "automatically generate", "autogenerate"],
+     "Auto-Generate Label"),
     (["return label", "generate return", "return package"],
      "SCENARIO GROUP D"),
     (["eparcel", "mypost", "account type", "mypost business"],
@@ -639,7 +673,10 @@ _PLAN_PROMPT = dedent("""\
     Plan how to verify this. The browser will ALWAYS start at the app home page.
 
     Navigation rules:
-    - For label generation scenarios (generate new label) → nav_clicks: ["Orders"]
+    - For label generation scenarios (generate new label, auto-generate label, auto generate label,
+      generate auto label, create label from Shopify) → nav_clicks: ["Orders"]
+      NOTE: "Orders" navigates to Shopify admin orders (admin.shopify.com/store/.../orders)
+            NOT the AU Post app. This is correct — label generation starts from Shopify.
     - For verifying an EXISTING label / downloading documents → nav_clicks: ["Shipping"]
     - For app settings scenarios → nav_clicks: ["Settings"]
     - For product configuration (dimensions, signature, extra cover on product)
@@ -710,7 +747,7 @@ _STEP_PROMPT = dedent("""\
       "action":       "click" | "fill" | "select" | "scroll" | "observe" | "navigate" | "verify" | "qa_needed" | "switch_tab" | "close_tab" | "download_zip" | "download_file" | "reset_order",
       "target":       "<exact element name from accessibility tree — required for click/fill/select/download_zip/download_file>",
       "value":        "<text to type (fill) OR option to select (select)>",
-      "path":         "<relative path only e.g. 'shopify' or 'settings' — NEVER put a full URL here — required for navigate>",
+      "path":         "<path for navigate — use 'orders' for Shopify admin Orders, 'shopify' for AU Post Shipping, 'settings' for AU Post Settings — NEVER a full URL>",
       "description":  "one sentence: what you are doing and why",
       "verdict":      "pass | fail | partial  — ONLY when action=verify",
       "finding":      "what you observed      — ONLY when action=verify",
@@ -948,6 +985,10 @@ def _do_action(page, action: dict, app_base: str) -> bool:
             url = "https://" + path.lstrip("/")
         elif path.startswith("store/"):
             url = "https://admin.shopify.com/" + path
+        elif path.lower() in ("orders", "shopifyorders", "shopify_orders"):
+            # Navigate to Shopify admin Orders page (NOT the AU Post app)
+            _store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
+            url = f"https://admin.shopify.com/store/{_store}/orders"
         else:
             url = f"{app_base}/{path}"
         try:
