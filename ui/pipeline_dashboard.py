@@ -2679,21 +2679,20 @@ def main():
                 sav_qa      = st.session_state.get(_sav_qa_key, {})   # {scenario: answer}
 
                 # ── URL + Credentials row ─────────────────────────
+                import config as _cfg
+                _env_path = Path(_cfg.AUTOMATION_CODEBASE_PATH) / ".env"
                 try:
                     from pipeline.smart_ac_verifier import get_auto_app_url
                     _auto_url = get_auto_app_url()
                 except Exception:
                     _auto_url = ""
                 # Fallback: read AUPOST_APP_URL directly from automation repo .env
-                if not _auto_url:
-                    import config as _cfg
-                    _env_path = Path(_cfg.AUTOMATION_CODEBASE_PATH) / ".env"
-                    if _env_path.exists():
-                        for _line in _env_path.read_text().splitlines():
-                            _k, _, _v = _line.partition("=")
-                            if _k.strip() == "AUPOST_APP_URL" and _v.strip():
-                                _auto_url = _v.strip().strip('"').strip("'")
-                                break
+                if not _auto_url and _env_path.exists():
+                    for _line in _env_path.read_text().splitlines():
+                        _k, _, _v = _line.partition("=")
+                        if _k.strip() == "AUPOST_APP_URL" and _v.strip():
+                            _auto_url = _v.strip().strip('"').strip("'")
+                            break
 
                 with st.expander("🔑 App URL & Login Credentials", expanded=False):
                     _cred_col1, _cred_col2 = st.columns([2, 1])
