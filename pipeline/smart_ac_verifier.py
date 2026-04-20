@@ -764,19 +764,28 @@ _SUMMARY_PROMPT = dedent("""\
 # ── Browser helpers ───────────────────────────────────────────────────────────
 
 def get_auto_app_url() -> str:
-    """Auto-detect app URL from automation repo .env STORE value."""
-    if _ENV_FILE.exists():
-        for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
-            s = line.strip()
-            if s.startswith("#") or "=" not in s:
-                continue
-            k, _, v = s.partition("=")
-            if k.strip() == "STORE":
-                v = v.strip().strip('"').strip("'")
-                if v and not v.startswith("your-"):
-                    store = v.replace(".myshopify.com", "")
-                    app_slug = os.getenv("AUPOST_APP_SLUG", "australia-post-rates-labels")
-                    return f"https://admin.shopify.com/store/{store}/apps/{app_slug}"
+    """Auto-detect app URL from automation repo .env (AUPOST_APP_URL or STORE)."""
+    if not _ENV_FILE.exists():
+        return ""
+    env_vals: dict[str, str] = {}
+    for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("#") or "=" not in s:
+            continue
+        k, _, v = s.partition("=")
+        env_vals[k.strip()] = v.strip().strip('"').strip("'")
+
+    # Prefer explicit full app URL
+    if env_vals.get("AUPOST_APP_URL"):
+        return env_vals["AUPOST_APP_URL"]
+
+    # Fallback: build from STORE slug
+    store = env_vals.get("STORE", "")
+    if store and not store.startswith("your-"):
+        store = store.replace(".myshopify.com", "")
+        app_slug = env_vals.get("AUPOST_APP_SLUG", "australia-post-rates-labels")
+        return f"https://admin.shopify.com/store/{store}/apps/{app_slug}"
+
     return ""
 
 
