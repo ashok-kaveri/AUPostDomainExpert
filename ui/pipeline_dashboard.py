@@ -1521,17 +1521,17 @@ def main():
 
                         # ── Complexity selector ────────────────────────────
                         _COMPLEXITY_MAP = {
+                            "🎯 Specific scenario (textbox above)":           -1,
                             "🟢 Simple  (2-3 scenarios · ~$0.80 · ~4 min)":  3,
                             "🟡 Medium  (3-4 scenarios · ~$1.20 · ~6 min)":  4,
                             "🔴 Complex (4-5 scenarios · ~$1.50 · ~8 min)":  5,
                             "⚫ All scenarios (full run)":                    None,
-                            "🎯 Specific scenario (textbox above)":           -1,
                         }
                         _complexity_key = f"sav_complexity_{card.id}"
                         _complexity_choice = st.radio(
                             "Card complexity",
                             options=list(_COMPLEXITY_MAP.keys()),
-                            index=st.session_state.get(_complexity_key + "_idx", 1),
+                            index=st.session_state.get(_complexity_key + "_idx", 2),
                             key=f"sav_complexity_radio_{card.id}",
                             horizontal=True,
                             label_visibility="collapsed",
