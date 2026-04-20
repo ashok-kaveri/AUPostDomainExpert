@@ -24,11 +24,9 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# ── Paths (same files the TypeScript helper reads) ────────────────────────────
-_AUTOMATION   = Path(config.AUTOMATION_CODEBASE_PATH)
-_PRODUCTS_CFG = _AUTOMATION / "testData" / "products" / "productsconfig.json"
-_ADDRESS_CFG  = _AUTOMATION / "testData" / "products" / "addressconfig.json"
-_ENV_FILE     = _AUTOMATION / ".env"
+# ── Paths ─────────────────────────────────────────────────────────────────────
+_AUTOMATION = Path(config.AUTOMATION_CODEBASE_PATH)
+_ENV_FILE   = _AUTOMATION / ".env"
 
 # ── Read store credentials from automation .env ───────────────────────────────
 def _read_env() -> dict[str, str]:
@@ -43,21 +41,54 @@ def _read_env() -> dict[str, str]:
     return env
 
 _ENV = _read_env()
-_STORE        = _ENV.get("STORE", "")
+# TypeScript uses SHOPIFY_STORE_NAME; support both keys
+_STORE        = _ENV.get("SHOPIFY_STORE_NAME", "") or _ENV.get("STORE", "")
 _ACCESS_TOKEN = _ENV.get("SHOPIFY_ACCESS_TOKEN", "")
 _API_VERSION  = _ENV.get("SHOPIFY_API_VERSION", "2024-01")
 _BASE_URL     = f"https://{_STORE}.myshopify.com/admin/api/{_API_VERSION}"
 
-# ── Load config files ─────────────────────────────────────────────────────────
+# ── Load products from env vars (same as TypeScript ShopifyOrderUploader) ─────
+def _parse_products_env(key: str) -> list[dict]:
+    raw = _ENV.get(key, "").strip()
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except Exception:
+        logger.warning("Could not parse %s from automation .env", key)
+        return []
+
+def _parse_address_env() -> dict:
+    """Parse SHIPPING_ADDRESS_JSON — array of single-key objects → merged dict."""
+    raw = _ENV.get("SHIPPING_ADDRESS_JSON", "").strip()
+    if not raw:
+        return {}
+    try:
+        arr = json.loads(raw)
+        merged = {}
+        for item in arr:
+            merged.update(item)
+        return merged
+    except Exception:
+        logger.warning("Could not parse SHIPPING_ADDRESS_JSON from automation .env")
+        return {}
+
+_SIMPLE_PRODUCTS   = _parse_products_env("SIMPLE_PRODUCTS_JSON")
+_VARIABLE_PRODUCTS = _parse_products_env("VARIABLE_PRODUCTS_JSON")
+_DIGITAL_PRODUCTS  = _parse_products_env("DIGITAL_PRODUCTS") or _parse_products_env("DIGITAL_PRODUCTS_JSON")
+_SHIP_ADDRESS      = _parse_address_env()
+
+# ── Legacy file-based config (fallback if env vars empty) ─────────────────────
 def _load_products() -> dict:
-    if _PRODUCTS_CFG.exists():
-        return json.loads(_PRODUCTS_CFG.read_text(encoding="utf-8"))
-    logger.warning("productsconfig.json not found at %s", _PRODUCTS_CFG)
+    cfg = _AUTOMATION / "testData" / "products" / "productsconfig.json"
+    if cfg.exists():
+        return json.loads(cfg.read_text(encoding="utf-8"))
     return {}
 
 def _load_addresses() -> dict:
-    if _ADDRESS_CFG.exists():
-        return json.loads(_ADDRESS_CFG.read_text(encoding="utf-8"))
+    cfg = _AUTOMATION / "testData" / "products" / "addressconfig.json"
+    if cfg.exists():
+        return json.loads(cfg.read_text(encoding="utf-8"))
     return {}
 
 _PRODUCTS  = _load_products()
@@ -117,28 +148,25 @@ def create_order(
         Shopify order dict {"id": ..., "name": "#1234", ...} or None on failure.
     """
     if not _STORE or not _ACCESS_TOKEN:
-        logger.error("STORE or SHOPIFY_ACCESS_TOKEN not set in automation .env")
+        logger.error("SHOPIFY_STORE_NAME or SHOPIFY_ACCESS_TOKEN not set in automation .env at %s", _ENV_FILE)
         return None
 
-    # ── Pick product ──────────────────────────────────────────────────────────
-    store_products = _PRODUCTS.get(_STORE, {})
-    product_list   = store_products.get(product_type, [])
-
+    # ── Pick product — prefer env vars, fall back to JSON config ──────────────
+    _type_map = {
+        "simple":    _SIMPLE_PRODUCTS   or _PRODUCTS.get(_STORE, {}).get("simple", []),
+        "variable":  _VARIABLE_PRODUCTS or _PRODUCTS.get(_STORE, {}).get("variable", []),
+        "digital":   _DIGITAL_PRODUCTS  or _PRODUCTS.get(_STORE, {}).get("digital", []),
+        "dangerous": _PRODUCTS.get(_STORE, {}).get("dangerous", []) or _SIMPLE_PRODUCTS,
+    }
+    product_list = _type_map.get(product_type, []) or _SIMPLE_PRODUCTS
     if not product_list:
-        # Fallback: try simple products
-        product_list = store_products.get("simple", [])
-        if not product_list:
-            logger.error("No products configured for store '%s' type '%s'", _STORE, product_type)
-            return None
-        logger.warning("No '%s' products for store '%s' — falling back to simple", product_type, _STORE)
+        logger.error("No products configured for type '%s' in automation .env or productsconfig.json", product_type)
+        return None
 
     product = product_list[min(product_index, len(product_list) - 1)]
 
-    # ── Pick address ──────────────────────────────────────────────────────────
-    addr = _ADDRESSES.get(address_type, _ADDRESSES.get("default", {}))
-    if not addr:
-        logger.error("No address config found for '%s'", address_type)
-        return None
+    # ── Pick address — prefer env var, fall back to JSON config ───────────────
+    addr = _SHIP_ADDRESS or _ADDRESSES.get(address_type, _ADDRESSES.get("default", {}))
 
     shipping_address = {
         "first_name": "Test",
@@ -146,7 +174,7 @@ def create_order(
         "phone":      "0400000000",
         "address1":   addr.get("street", "123 Main Street"),
         "city":       addr.get("city", "Sydney"),
-        "province":   addr.get("state", "NSW"),
+        "province":   addr.get("state", "New South Wales"),
         "country":    addr.get("countryCode", "AU"),
         "zip":        addr.get("zip", "2000"),
     }
@@ -196,17 +224,16 @@ def create_bulk_orders(
     Returns list of created order dicts (name + id). Empty list on total failure.
     """
     if not _STORE or not _ACCESS_TOKEN:
-        logger.error("STORE or SHOPIFY_ACCESS_TOKEN not set in automation .env")
+        logger.error("SHOPIFY_STORE_NAME or SHOPIFY_ACCESS_TOKEN not set in automation .env at %s", _ENV_FILE)
         return []
 
-    store_products = _PRODUCTS.get(_STORE, {})
-    product_list   = store_products.get(product_type, []) or store_products.get("simple", [])
+    product_list = _SIMPLE_PRODUCTS or _PRODUCTS.get(_STORE, {}).get(product_type, []) or _PRODUCTS.get(_STORE, {}).get("simple", [])
     if not product_list:
-        logger.error("No products found for store '%s'", _STORE)
+        logger.error("No products found in automation .env or productsconfig.json")
         return []
 
     product = product_list[0]
-    addr    = _ADDRESSES.get(address_type, _ADDRESSES.get("default", {}))
+    addr    = _SHIP_ADDRESS or _ADDRESSES.get(address_type, _ADDRESSES.get("default", {}))
 
     shipping_address = {
         "first_name": "Test",
@@ -214,7 +241,7 @@ def create_bulk_orders(
         "phone":      "0400000000",
         "address1":   addr.get("street", "123 Main Street"),
         "city":       addr.get("city", "Sydney"),
-        "province":   addr.get("state", "NSW"),
+        "province":   addr.get("state", "New South Wales"),
         "country":    addr.get("countryCode", "AU"),
         "zip":        addr.get("zip", "2000"),
     }
