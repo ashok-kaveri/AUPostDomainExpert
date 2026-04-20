@@ -855,8 +855,9 @@ def main():
     ])
 
     # ── Release setup helper (board selector + card loader) ─────────────────
-    def _render_release_setup():
+    def _render_release_setup(tab_id: str = ""):
         """Render board/list selector and load cards into session_state."""
+        _t = tab_id  # short alias for key prefixing
         if not api_ok:
             st.error("❌ ANTHROPIC_API_KEY not set — add it to .env to use this feature")
             return
@@ -896,12 +897,12 @@ def main():
 
         col_refresh, col_boards = st.columns([1, 1])
         with col_refresh:
-            if st.button("🔄 Refresh Trello lists", use_container_width=True):
+            if st.button("🔄 Refresh Trello lists", key=f"rts_refresh_{_t}", use_container_width=True):
                 st.cache_data.clear()
                 st.session_state.pop("all_trello_boards", None)
                 st.rerun()
         with col_boards:
-            if st.button("📋 List All Boards", use_container_width=True):
+            if st.button("📋 List All Boards", key=f"rts_list_boards_{_t}", use_container_width=True):
                 with st.spinner("Fetching boards…"):
                     try:
                         _boards = TrelloClient.list_all_boards()
@@ -925,7 +926,7 @@ def main():
                         if _is_active:
                             st.caption("Active")
                         else:
-                            if st.button("Select", key=f"sel_board_{_b['id']}",
+                            if st.button("Select", key=f"sel_board_{_t}_{_b['id']}",
                                          type="primary", use_container_width=True):
                                 st.session_state["selected_board_id"]   = _b["id"]
                                 st.session_state["selected_board_name"] = _b["name"]
@@ -939,7 +940,7 @@ def main():
             all_lists = _get_board_lists(st.session_state.get("selected_board_id", ""))
 
             # Filter toggle — show only QA lists or all lists
-            show_all = st.toggle("Show all lists", value=True)
+            show_all = st.toggle("Show all lists", key=f"rts_toggle_{_t}", value=True)
             if show_all:
                 filtered_lists = all_lists
             else:
@@ -962,6 +963,7 @@ def main():
                     f"Select release list ({len(list_names)} lists)",
                     list_names,
                     index=default_idx,
+                    key=f"rts_list_sel_{_t}",
                 )
             else:
                 st.info("No lists found on this board. Try enabling 'Show all lists' or select a different board.")
@@ -971,7 +973,7 @@ def main():
         with col_load:
             st.write("")
             st.write("")
-            load_btn = st.button("📥 Load Cards", use_container_width=True, disabled=not selected_list_id)
+            load_btn = st.button("📥 Load Cards", key=f"rts_load_{_t}", use_container_width=True, disabled=not selected_list_id)
 
         # -- Release version input (editable, auto-filled from list name)
         def _extract_release(list_name: str | None) -> str:
@@ -989,6 +991,7 @@ def main():
 
         release_label = st.text_input(
             "🏷️ Release version",
+            key=f"rts_release_{_t}",
             value=_extract_release(selected_list_name),
             placeholder="e.g. AUPostapp 2.3.115",
             help="This will be recorded in the 'Release' column of the master sheet",
@@ -1040,7 +1043,7 @@ def main():
     with tab_validate_ac:
         cards_loaded = bool(st.session_state.get("rqa_cards", []))
         with st.expander("📥 Load / Change Cards", expanded=not cards_loaded):
-            _render_release_setup()
+            _render_release_setup(tab_id="vac")
 
 
 
@@ -1267,7 +1270,7 @@ def main():
         current_release = st.session_state.get("rqa_release", "")
 
         with st.expander("📥 Load / Change Cards", expanded=not bool(cards)):
-            _render_release_setup()
+            _render_release_setup(tab_id="gs")
 
         if not cards:
             st.stop()
@@ -1433,7 +1436,7 @@ def main():
     with tab_run_smart:
         cards_loaded = bool(st.session_state.get("rqa_cards", []))
         with st.expander("📥 Load / Change Cards", expanded=not cards_loaded):
-            _render_release_setup()
+            _render_release_setup(tab_id="rss")
 
 
         # Refresh local refs from session_state
@@ -2109,7 +2112,7 @@ def main():
             st.caption("Generate Playwright automation for a card from the loaded release.")
 
             if not cards:
-                _render_release_setup()
+                _render_release_setup(tab_id="wa")
                 st.stop()
 
             cards = st.session_state.get("rqa_cards", [])
@@ -3500,7 +3503,7 @@ def main():
     with tab_gen_docs:
         cards_loaded = bool(st.session_state.get("rqa_cards", []))
         with st.expander("📥 Load / Change Cards", expanded=not cards_loaded):
-            _render_release_setup()
+            _render_release_setup(tab_id="gd")
 
 
         # Refresh local refs from session_state
