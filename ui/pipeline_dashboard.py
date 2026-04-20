@@ -1617,14 +1617,24 @@ def main():
                                 st.session_state.pop(_sav_prog_key, None)
                                 st.rerun()
                             else:
-                                # Still running — show live progress, auto-rerun every 2 s
-                                _prog = st.session_state.get(_sav_prog_key, {})
-                                _pct  = _prog.get("pct", 0.0)
-                                _txt  = _prog.get("text", "🌐 Chrome is open — Claude is verifying AC scenarios…")
-                                st.progress(_pct)
-                                st.info(_txt)
-                                time.sleep(2)
-                                st.rerun()
+                                # Still running — use fragment so only the progress bar
+                                # re-renders every 2 s (no full page reload)
+                                _rk2 = _sav_result_key
+                                _pk2 = _sav_prog_key
+
+                                @st.fragment(run_every=2)
+                                def _sav_live_progress():
+                                    _r = st.session_state.get(_rk2, {})
+                                    if _r.get("done"):
+                                        st.rerun()   # full rerun to harvest results
+                                        return
+                                    _p   = st.session_state.get(_pk2, {})
+                                    _pct = _p.get("pct", 0.0)
+                                    _txt = _p.get("text", "🌐 Chrome is open — Claude is verifying AC scenarios…")
+                                    st.progress(_pct)
+                                    st.info(_txt)
+
+                                _sav_live_progress()
 
                         if run_sav:
                             if not sav_url.strip():
