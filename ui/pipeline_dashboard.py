@@ -1063,7 +1063,7 @@ def main():
                 # ── Generate button ────────────────────────────────────────
                 if not ac_suggestion:
                     if st.button(
-                        "🤖 Generate Acceptance Criteria",
+                        "✅ Validate Acceptance Criteria",
                         key=f"vac_gen_ac_{card.id}",
                         type="primary",
                         use_container_width=True,
