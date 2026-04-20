@@ -816,18 +816,2447 @@ def main():
         st.caption("Generates output without writing to Trello, repo, or Sheets.")
 
     # ── Tab layout ──────────────────────────────────────────────────────────
-    tab_us, tab_devdone, tab_release, tab_history, tab_signoff, tab_manual, tab_run = st.tabs([
-        "📝 User Story", "🔀 Move Cards", "🚀 Release QA", "📋 History", "✅ Sign Off", "✍️ Write Automation", "▶️ Run Automation"
+    # ── Shared state: load before tabs so all tabs can access ──────────────
+    _shared_cards_loaded = (
+        "rqa_cards" in st.session_state and st.session_state["rqa_cards"]
+    )
+    if _shared_cards_loaded:
+        cards          = st.session_state["rqa_cards"]
+        tc_store       = st.session_state.setdefault("rqa_test_cases", {})
+        approved_store = st.session_state.setdefault("rqa_approved", {})
+        current_release = st.session_state.get("rqa_release", "")
+    else:
+        cards = []
+        tc_store = {}
+        approved_store = {}
+        current_release = ""
+
+    # ── Tab layout ──────────────────────────────────────────────────────────
+    (
+        tab_us,
+        tab_devdone,
+        tab_validate_ac,
+        tab_gen_scenarios,
+        tab_run_smart,
+        tab_write_auto,
+        tab_run_automation,
+        tab_signoff,
+        tab_gen_docs,
+    ) = st.tabs([
+        "📝 User Story",
+        "🔀 Move Cards",
+        "✅ Validate Acceptance Criteria",
+        "🧪 Generate Scenarios",
+        "🔍 Run Smart Scenarios",
+        "✍️ Write Automation Code",
+        "▶️ Run Automation",
+        "✅ Sign Off",
+        "📄 Generate Documents",
     ])
 
-    # ── Tab 0: Release QA ───────────────────────────────────────────────────
-    with tab_release:
-
+    # ── Release setup helper (board selector + card loader) ─────────────────
+    def _render_release_setup():
+        """Render board/list selector and load cards into session_state."""
         if not api_ok:
             st.error("❌ ANTHROPIC_API_KEY not set — add it to .env to use this feature")
-        elif not trello_ok:
+            return
+        if not trello_ok:
             st.error("❌ Trello credentials missing — set TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID in .env")
-        else:
+            return
+
+        from pipeline.trello_client import TrelloClient
+        from pipeline.card_processor import (
+            generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
+        )
+        from pipeline.sheets_writer import (
+            append_to_sheet, detect_tab, SHEET_TABS,
+            check_duplicates, parse_test_cases_to_rows,
+        )
+        from pipeline.domain_validator import validate_card, ValidationReport
+        from pathlib import Path
+
+        sheets_ready = sheets_ok
+        if not sheets_ready:
+            st.info("ℹ️ Google Sheets not connected — test cases will save to Trello only. "
+                    "Add `credentials.json` to enable sheet sync.")
+
+        # ── List selector ─────────────────────────────────────────────
+        st.markdown(
+            '<div class="step-chip">① Select Release</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Active board indicator ─────────────────────────────────
+        _active_board_id   = st.session_state.get("selected_board_id", "")
+        _active_board_name = st.session_state.get("selected_board_name", "")
+        if _active_board_name:
+            st.success(f"📌 Active board: **{_active_board_name}**")
+        elif _active_board_id:
+            st.info(f"📌 Active board ID: `{_active_board_id}` (from .env)")
+
+        col_refresh, col_boards = st.columns([1, 1])
+        with col_refresh:
+            if st.button("🔄 Refresh Trello lists", use_container_width=True):
+                st.cache_data.clear()
+                st.session_state.pop("all_trello_boards", None)
+                st.rerun()
+        with col_boards:
+            if st.button("📋 List All Boards", use_container_width=True):
+                with st.spinner("Fetching boards…"):
+                    try:
+                        _boards = TrelloClient.list_all_boards()
+                        st.session_state["all_trello_boards"] = _boards
+                    except Exception as _be:
+                        st.error(f"❌ {_be}")
+
+        if st.session_state.get("all_trello_boards"):
+            _boards = st.session_state["all_trello_boards"]
+            with st.expander(f"📋 Your Trello Boards ({len(_boards)})", expanded=True):
+                for _b in _boards:
+                    _is_active = _b["id"] == st.session_state.get("selected_board_id")
+                    _bcol1, _bcol2 = st.columns([4, 1])
+                    with _bcol1:
+                        st.markdown(
+                            f"{'✅ ' if _is_active else ''}**{_b['name']}**  \n"
+                            f"ID: `{_b['id']}`  \n"
+                            f"[Open in Trello]({_b['url']})",
+                        )
+                    with _bcol2:
+                        if _is_active:
+                            st.caption("Active")
+                        else:
+                            if st.button("Select", key=f"sel_board_{_b['id']}",
+                                         type="primary", use_container_width=True):
+                                st.session_state["selected_board_id"]   = _b["id"]
+                                st.session_state["selected_board_name"] = _b["name"]
+                                st.session_state.pop("all_trello_boards", None)
+                                st.cache_data.clear()
+                                st.rerun()
+                    st.divider()
+
+        col_list, col_load = st.columns([4, 1])
+        with col_list:
+            all_lists = _get_board_lists(st.session_state.get("selected_board_id", ""))
+
+            # Filter toggle — show only QA lists or all lists
+            show_all = st.toggle("Show all lists", value=True)
+            if show_all:
+                filtered_lists = all_lists
+            else:
+                filtered_lists = [
+                    (name, lid) for name, lid in all_lists
+                    if "ready for qa" in name.lower() or "qa" in name.lower()
+                ]
+                # Auto-fallback: if filter returns nothing, show everything
+                if not filtered_lists:
+                    filtered_lists = all_lists
+                    st.caption("ℹ️ No QA-filtered lists found — showing all lists.")
+
+            list_names = [name for name, _ in filtered_lists]
+            # Default to first "Ready for QA AU Post" list
+            default_idx = next(
+                (i for i, n in enumerate(list_names) if ("aupost" in n.lower() or "australia post" in n.lower()) and "ready for qa" in n.lower()), 0
+            )
+            if list_names:
+                selected_list_name = st.selectbox(
+                    f"Select release list ({len(list_names)} lists)",
+                    list_names,
+                    index=default_idx,
+                )
+            else:
+                st.info("No lists found on this board. Try enabling 'Show all lists' or select a different board.")
+                selected_list_name = None
+            selected_list_id = next((lid for name, lid in filtered_lists if name == selected_list_name), "")
+
+        with col_load:
+            st.write("")
+            st.write("")
+            load_btn = st.button("📥 Load Cards", use_container_width=True, disabled=not selected_list_id)
+
+        # -- Release version input (editable, auto-filled from list name)
+        def _extract_release(list_name: str | None) -> str:
+            """Extract release label from list name.
+            'Ready for QA AUPostapp 2.3.115' → 'AUPostapp 2.3.115'
+            """
+            if not list_name:
+                return ""
+            m = re.search(r'(aupost\w*\s+[\d.]+)', list_name, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+            # fallback: grab any version-like pattern
+            m2 = re.search(r'(v?[\d]+\.[\d]+[\d.]*)', list_name)
+            return m2.group(1) if m2 else list_name
+
+        release_label = st.text_input(
+            "🏷️ Release version",
+            value=_extract_release(selected_list_name),
+            placeholder="e.g. AUPostapp 2.3.115",
+            help="This will be recorded in the 'Release' column of the master sheet",
+        )
+
+        # -- Load cards + auto-validate all
+        if load_btn and selected_list_id:
+            trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
+            cards = trello.get_cards_in_list(selected_list_id)
+            st.session_state["rqa_cards"] = cards
+            st.session_state["rqa_list_name"] = selected_list_name
+            st.session_state["rqa_release"] = release_label
+            st.session_state["rqa_test_cases"] = {}
+            st.session_state["rqa_approved"] = {}
+            # Clear old validations for fresh load
+            for c in cards:
+                st.session_state.pop(f"validation_{c.id}", None)
+
+            # Auto-validate all cards immediately
+            st.info(f"Loaded {len(cards)} cards from **{selected_list_name}** — running Domain Expert validation…")
+            progress = st.progress(0)
+            for idx, c in enumerate(cards):
+                with st.spinner(f"🧠 Validating '{c.name}'…"):
+                    st.session_state[f"validation_{c.id}"] = validate_card(
+                        card_name=c.name,
+                        card_desc=c.desc or "",
+                        acceptance_criteria=c.desc or "",
+                    )
+                progress.progress((idx + 1) / len(cards))
+            progress.empty()
+
+            # Cross-card release analysis (runs after per-card validation)
+            from pipeline.release_analyser import analyse_release, CardSummary as RASummary
+            ra_cards = [
+                RASummary(card_id=c.id, card_name=c.name, card_desc=c.desc or "")
+                for c in cards
+            ]
+            with st.spinner("🔬 Running cross-card release analysis…"):
+                st.session_state["release_analysis"] = analyse_release(
+                    release_name=release_label,
+                    cards=ra_cards,
+                )
+            st.rerun()
+
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Tab: Validate Acceptance Criteria — Steps 1, 1b, 2
+    # ═══════════════════════════════════════════════════════════════════════════
+    with tab_validate_ac:
+        if not cards:
+            _render_release_setup()
+            st.stop()
+
+        # Refresh local refs from session_state
+        cards = st.session_state.get("rqa_cards", [])
+        tc_store = st.session_state.setdefault("rqa_test_cases", {})
+        approved_store = st.session_state.setdefault("rqa_approved", {})
+        current_release = st.session_state.get("rqa_release", "")
+        if not cards:
+            st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
+            st.stop()
+
+        from pipeline.trello_client import TrelloClient
+        from pipeline.card_processor import (
+            generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
+        )
+        from pipeline.sheets_writer import (
+            append_to_sheet, detect_tab, SHEET_TABS,
+            check_duplicates, parse_test_cases_to_rows,
+        )
+        from pipeline.domain_validator import validate_card, ValidationReport
+        from pathlib import Path
+        sheets_ready = sheets_ok
+
+        approved_count = sum(1 for v in approved_store.values() if v)
+
+        # ── Release health summary ────────────────────────────────
+        st.divider()
+        val_statuses = [
+            st.session_state.get(f"validation_{c.id}")
+            for c in cards
+        ]
+        n_pass  = sum(1 for v in val_statuses if v and v.overall_status == "PASS")
+        n_review= sum(1 for v in val_statuses if v and v.overall_status == "NEEDS_REVIEW")
+        n_fail  = sum(1 for v in val_statuses if v and v.overall_status == "FAIL")
+        n_val   = sum(1 for v in val_statuses if v)
+        approved_count = sum(1 for v in approved_store.values() if v)
+
+        hcols = st.columns(5)
+        hcols[0].metric("📦 Total Cards", len(cards))
+        hcols[1].metric("🟢 Pass", n_pass)
+        hcols[2].metric("🟡 Needs Review", n_review)
+        hcols[3].metric("🔴 Fail", n_fail)
+        hcols[4].metric("✅ Approved", approved_count)
+
+        # ── Release Intelligence (cross-card RAG pre-screen) ──────────
+        from pipeline.release_analyser import ReleaseAnalysis
+        ra: ReleaseAnalysis | None = st.session_state.get("release_analysis")
+        if ra and not ra.error:
+            risk_colors = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}
+            risk_icon = risk_colors.get(ra.risk_level, "⚪")
+            with st.expander(
+                f"{risk_icon} **Release Intelligence — {ra.risk_level} RISK** · {ra.risk_summary}",
+                expanded=False,
+            ):
+                if ra.kb_context_summary:
+                    st.info(f"📚 **KB Context:** {ra.kb_context_summary}")
+
+                col_left, col_right = st.columns(2)
+
+                with col_left:
+                    if ra.conflicts:
+                        st.markdown("##### ⚠️ Cross-Card Conflicts")
+                        for conflict in ra.conflicts:
+                            cards_involved = " & ".join(conflict.get("cards", []))
+                            area = conflict.get("area", "")
+                            desc = conflict.get("description", "")
+                            st.warning(f"**{cards_involved}** — *{area}*\n\n{desc}")
+                    else:
+                        st.success("✅ No cross-card conflicts detected")
+
+                    if ra.coverage_gaps:
+                        st.markdown("##### 🕳️ Coverage Gaps")
+                        for gap in ra.coverage_gaps:
+                            st.caption(f"• {gap}")
+
+                with col_right:
+                    if ra.ordering:
+                        st.markdown("##### 📋 Suggested Test Order")
+                        for o in ra.ordering:
+                            pos = o.get("position", "")
+                            cname = o.get("card_name", "")
+                            reason = o.get("reason", "")
+                            st.markdown(f"**{pos}.** {cname}")
+                            st.caption(f"   ↳ {reason}")
+
+                if ra.sources:
+                    st.caption(
+                        "KB sources: " + " · ".join(
+                            f"[link]({s})" if s.startswith("http") else s
+                            for s in ra.sources[:4]
+                        )
+                    )
+        elif ra and ra.error:
+            st.warning(f"⚠️ Release analysis incomplete: {ra.error}")
+
+        st.divider()
+        for card in cards:
+            is_approved = approved_store.get(card.id, False)
+            vr: ValidationReport | None = st.session_state.get(f"validation_{card.id}")
+
+            # ── Detect if already processed (AC in desc, TCs in comments) ──
+            existing_tc_comment = next(
+                (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                None,
+            )
+            has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
+            has_existing_tc = bool(existing_tc_comment)
+            already_done    = has_existing_ac and has_existing_tc
+
+            # Expander icon shows validation + approval status
+            val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                vr.overall_status if vr else "", "⚪"
+            )
+            appr_icon = "✅ " if is_approved else ""
+            done_badge = "⚡ " if already_done and not is_approved else ""
+            with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=False):
+                # ── Already processed banner ──────────────────────
+                if already_done and not is_approved:
+                    st.info(
+                        "⚡ **This card was already processed** — AC is in the description "
+                        "and test cases exist in a Trello comment."
+                    )
+                    col_proc1, col_proc2, col_proc3 = st.columns(3)
+                    with col_proc1:
+                        if st.button(
+                            "➡️ Proceed to Automation",
+                            key=f"proceed_{card.id}",
+                            use_container_width=True,
+                            type="primary",
+                            help="Skip AC + TC generation — use existing and go straight to writing automation",
+                        ):
+                            # Pre-fill TC session state from existing Trello comment
+                            tc_store[card.id] = existing_tc_comment
+                            approved_store[card.id] = True
+                            st.session_state[f"ac_saved_{card.id}"] = True
+                            st.rerun()
+                    with col_proc2:
+                        if st.button(
+                            "📋 View existing TCs",
+                            key=f"view_tc_{card.id}",
+                            use_container_width=True,
+                        ):
+                            st.session_state[f"show_existing_tc_{card.id}"] = True
+                    with col_proc3:
+                        if st.button(
+                            "🔄 Regenerate",
+                            key=f"banner_regen_{card.id}",
+                            use_container_width=True,
+                            help="Start fresh — will add new rows to Trello + Sheet",
+                        ):
+                            st.session_state[f"force_regen_{card.id}"] = True
+
+                    if st.session_state.get(f"show_existing_tc_{card.id}"):
+                        with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
+                            st.markdown(existing_tc_comment)
+                            if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                                del st.session_state[f"show_existing_tc_{card.id}"]
+                                st.rerun()
+
+                # For already-processed cards: skip AC/TC steps, show only SAV
+                _processed_only = (already_done and not is_approved
+                        and not st.session_state.get(f"force_regen_{card.id}", False))
+
+                if not _processed_only:
+                    # ── STEP 1: Card Description ──────────────────────
+                    _step_header("1", "Card Requirements")
+                    if card.desc:
+                        st.markdown(card.desc[:600] + ("…" if len(card.desc) > 600 else ""))
+                    else:
+                        st.caption("_(No description on this card)_")
+
+                    # ── STEP 1b: AI Suggest User Story + AC ───────────
+                    _step_header("1b", "AI Suggested User Story & AC")
+                    ac_suggest_key = f"ac_suggestion_{card.id}"
+                    ac_saved_key   = f"ac_saved_{card.id}"
+                    ac_suggestion  = st.session_state.get(ac_suggest_key)
+                    ac_saved       = st.session_state.get(ac_saved_key, False)
+
+                    if ac_saved:
+                        st.success("✅ AI-generated AC saved to Trello description")
+                    elif ac_suggestion:
+                        st.markdown(ac_suggestion)
+                        col_save_ac, col_comment_ac, col_skip_ac, col_dm_ac, col_ch_ac = st.columns(5)
+                        with col_save_ac:
+                            if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
+                                         use_container_width=True, type="primary"):
+                                with st.spinner("Updating Trello description…"):
+                                    TrelloClient(board_id=st.session_state.get("selected_board_id") or None).update_card_description(card.id, ac_suggestion)
+                                    card.desc = ac_suggestion
+                                st.session_state[ac_saved_key] = True
+                                st.rerun()
+                        with col_comment_ac:
+                            if st.button("💬 Add to Trello Comment", key=f"comment_ac_{card.id}",
+                                         use_container_width=True):
+                                with st.spinner("Adding comment to Trello card…"):
+                                    TrelloClient(board_id=st.session_state.get("selected_board_id") or None).add_comment(card.id, ac_suggestion)
+                                st.success("✅ AC added as Trello comment")
+                        with col_skip_ac:
+                            if st.button("⏭️ Skip — Keep Existing", key=f"skip_ac_{card.id}",
+                                         use_container_width=True):
+                                st.session_state[ac_saved_key] = True  # mark done so it collapses
+                                st.rerun()
+                        with col_dm_ac:
+                            if st.button("📨 Send via Slack DM", key=f"open_dm_ac_{card.id}",
+                                         use_container_width=True):
+                                st.session_state[f"show_dm_ac_{card.id}"] = True
+                                st.session_state[f"show_ch_ac_{card.id}"] = False
+                        with col_ch_ac:
+                            if st.button("📢 Send to Channel", key=f"open_ch_ac_{card.id}",
+                                         use_container_width=True):
+                                st.session_state[f"show_ch_ac_{card.id}"] = True
+                                st.session_state[f"show_dm_ac_{card.id}"] = False
+
+                        # ── Slack Channel panel (AC) ────────────────────
+                        if st.session_state.get(f"show_ch_ac_{card.id}"):
+                            from pipeline.slack_client import (
+                                dm_token_configured, list_slack_channels,
+                                post_content_to_slack_channel,
+                            )
+                            if not dm_token_configured():
+                                st.warning(
+                                    "⚠️ SLACK_BOT_TOKEN is not set — channel posting requires a bot token.\n\n"
+                                    "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                                )
+                            else:
+                                st.markdown("##### 📢 Post AC to Slack Channel")
+                                _ch_cache_key = "slack_channels_cache"
+                                if _ch_cache_key not in st.session_state:
+                                    with st.spinner("Loading channels…"):
+                                        _chs, _ch_err, _ch_note = list_slack_channels()
+                                    if _ch_err:
+                                        st.error(f"❌ {_ch_err}")
+                                        _chs = []
+                                    st.session_state[_ch_cache_key] = (_chs, _ch_note)
+                                else:
+                                    _chs, _ch_note = st.session_state[_ch_cache_key]
+
+                                if _ch_note:
+                                    st.caption(f"ℹ️ {_ch_note}")
+
+                                if _chs:
+                                    _ch_options = {
+                                        f"{'🔒' if c['is_private'] else '#'} {c['name']}": c["id"]
+                                        for c in _chs
+                                    }
+                                    _ac_ch_sel_col, _ac_ch_ref_col = st.columns([3, 1])
+                                    with _ac_ch_sel_col:
+                                        _ac_ch_sel = st.selectbox(
+                                            "Select channel",
+                                            options=list(_ch_options.keys()),
+                                            key=f"ac_ch_select_{card.id}",
+                                        )
+                                    with _ac_ch_ref_col:
+                                        st.markdown("<br>", unsafe_allow_html=True)
+                                        if st.button("🔄 Refresh", key=f"ac_ch_refresh_{card.id}",
+                                                     use_container_width=True):
+                                            del st.session_state[_ch_cache_key]
+                                            st.rerun()
+
+                                    _ac_ch_sent_key = f"ac_ch_sent_{card.id}"
+                                    if st.session_state.get(_ac_ch_sent_key):
+                                        st.success("✅ AC posted to channel!")
+                                        if st.button("📢 Post again", key=f"ac_ch_resend_{card.id}"):
+                                            st.session_state[_ac_ch_sent_key] = False
+                                            st.rerun()
+                                    else:
+                                        if st.button(
+                                            f"📢 Post to {_ac_ch_sel}",
+                                            key=f"ac_ch_send_btn_{card.id}",
+                                            type="primary",
+                                            use_container_width=True,
+                                        ):
+                                            _sel_ch_id = _ch_options[_ac_ch_sel]
+                                            with st.spinner("Posting to channel…"):
+                                                _ch_result = post_content_to_slack_channel(
+                                                    channel_id=_sel_ch_id,
+                                                    card_name=card.name,
+                                                    content_text=ac_suggestion,
+                                                    content_label="Acceptance Criteria",
+                                                    card_url=getattr(card, "url", ""),
+                                                )
+                                            if _ch_result["ok"]:
+                                                st.session_state[_ac_ch_sent_key] = True
+                                                st.rerun()
+                                            else:
+                                                st.error(f"❌ {_ch_result['error']}")
+
+                        # ── Slack DM panel (AC) ─────────────────────────
+                        if st.session_state.get(f"show_dm_ac_{card.id}"):
+                            from pipeline.slack_client import (
+                                dm_token_configured, search_slack_users, send_ac_dm,
+                            )
+                            if not dm_token_configured():
+                                st.warning(
+                                    "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
+                                    "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                                )
+                            else:
+                                st.markdown("##### 📨 Send AC via Slack DM")
+                                # ── Search row ───────────────────────────
+                                _dm_col1, _dm_col2 = st.columns([3, 1])
+                                with _dm_col1:
+                                    _dm_query = st.text_input(
+                                        "Search member",
+                                        placeholder="Search by name — add multiple one by one",
+                                        key=f"dm_search_query_{card.id}",
+                                    )
+                                with _dm_col2:
+                                    st.markdown("<br>", unsafe_allow_html=True)
+                                    _do_search = st.button(
+                                        "🔍 Search",
+                                        key=f"dm_search_btn_{card.id}",
+                                        use_container_width=True,
+                                    )
+
+                                # Accumulated user pool (across multiple searches)
+                                _pool_key = f"dm_user_pool_{card.id}"
+                                if _pool_key not in st.session_state:
+                                    st.session_state[_pool_key] = {}  # {label: id}
+
+                                if _do_search and _dm_query.strip():
+                                    with st.spinner("Searching…"):
+                                        _raw = search_slack_users(_dm_query.strip())
+                                    _found, _search_err = (_raw if isinstance(_raw, tuple)
+                                                           else (_raw or [], ""))
+                                    if _search_err:
+                                        st.error(f"❌ {_search_err}")
+                                    elif not _found:
+                                        st.info("No users found — try a different name.")
+                                    else:
+                                        # Merge into pool
+                                        for u in _found:
+                                            _lbl = f"{u['name']} (@{u['display_name']})"
+                                            st.session_state[_pool_key][_lbl] = u["id"]
+                                        st.success(f"Found {len(_found)} user(s) — select below.")
+
+                                _pool = st.session_state[_pool_key]
+                                if _pool:
+                                    _selected_labels = st.multiselect(
+                                        "Select recipients (pick multiple)",
+                                        options=list(_pool.keys()),
+                                        key=f"dm_user_multi_{card.id}",
+                                    )
+                                    # Clear pool button
+                                    if st.button("✖ Clear search results",
+                                                 key=f"dm_clear_{card.id}"):
+                                        st.session_state[_pool_key] = {}
+                                        st.rerun()
+
+                                    _dm_sent_key = f"ac_dm_sent_{card.id}"
+                                    if st.session_state.get(_dm_sent_key):
+                                        st.success("✅ AC sent via Slack DM!")
+                                        if st.button("📨 Send again",
+                                                     key=f"dm_resend_{card.id}"):
+                                            st.session_state[_dm_sent_key] = False
+                                            st.rerun()
+                                    elif _selected_labels:
+                                        _selected_uids = [_pool[l] for l in _selected_labels]
+                                        _n = len(_selected_uids)
+                                        if st.button(
+                                            f"📨 Send to {_n} person{'s' if _n > 1 else ''}",
+                                            key=f"dm_send_btn_{card.id}",
+                                            type="primary",
+                                            use_container_width=True,
+                                        ):
+                                            with st.spinner(f"Sending DM to {_n} recipient(s)…"):
+                                                _dm_result = send_ac_dm(
+                                                    user_ids=_selected_uids,
+                                                    card_name=card.name,
+                                                    ac_text=ac_suggestion,
+                                                    content_label="Acceptance Criteria",
+                                                )
+                                            if _dm_result["ok"]:
+                                                st.session_state[_dm_sent_key] = True
+                                                st.rerun()
+                                            else:
+                                                _s, _f = _dm_result.get("sent",0), _dm_result.get("failed",0)
+                                                if _s:
+                                                    st.warning(f"⚠️ Sent to {_s}, failed for {_f}: {_dm_result['error']}")
+                                                else:
+                                                    st.error(f"❌ DM failed: {_dm_result['error']}")
+                                    else:
+                                        st.caption("Select at least one recipient above.")
+                    else:
+                        if st.button("🤖 Generate User Story & AC", key=f"gen_ac_{card.id}"):
+                            from pipeline.card_processor import generate_acceptance_criteria
+                            raw = f"{card.name}\n\n{card.desc or ''}".strip()
+                            with st.spinner("Claude is generating User Story & AC…"):
+                                st.session_state[ac_suggest_key] = generate_acceptance_criteria(
+                                    raw,
+                                    attachments=card.attachments,
+                                    checklists=card.checklists,
+                                )
+                            st.rerun()
+
+                    # ── STEP 2: Domain Expert Validation ──────────────
+                    _step_header("2", "Domain Expert Validation")
+                    val_key = f"validation_{card.id}"
+
+                    if vr:
+                        status_color = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                            vr.overall_status, "⚪"
+                        )
+                        st.markdown(f"{status_color} **{vr.overall_status}** — {vr.summary}")
+
+                        # KB insights
+                        if vr.kb_insights:
+                            with st.expander("📚 Knowledge Base context", expanded=False):
+                                st.markdown(vr.kb_insights)
+                                if vr.sources:
+                                    st.caption("Sources: " + " · ".join(
+                                        f"[link]({s})" if s.startswith("http") else s
+                                        for s in vr.sources[:4]
+                                    ))
+
+                        # Issues grid
+                        has_issues = any([vr.requirement_gaps, vr.ac_gaps,
+                                          vr.accuracy_issues, vr.suggestions])
+                        if has_issues:
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                if vr.accuracy_issues:
+                                    st.error("**❌ Accuracy Issues**")
+                                    for issue in vr.accuracy_issues:
+                                        st.markdown(f"- {issue}")
+                                if vr.requirement_gaps:
+                                    st.warning("**⚠️ Requirement Gaps**")
+                                    for gap in vr.requirement_gaps:
+                                        st.markdown(f"- {gap}")
+                            with c2:
+                                if vr.ac_gaps:
+                                    st.warning("**📋 Missing AC Scenarios**")
+                                    for gap in vr.ac_gaps:
+                                        st.markdown(f"- {gap}")
+                                if vr.suggestions:
+                                    st.info("**💡 Suggestions**")
+                                    for s in vr.suggestions:
+                                        st.markdown(f"- {s}")
+
+                            # Fix + Re-validate
+                            st.caption("👆 Fix the card on Trello, then re-validate below")
+                            if st.button("🔄 Re-validate after fix", key=f"reval_{card.id}"):
+                                # Refresh card from Trello + re-run validation
+                                with st.spinner("Fetching updated card from Trello…"):
+                                    fresh = TrelloClient(board_id=st.session_state.get("selected_board_id") or None).get_card(card.id)
+                                with st.spinner("Re-validating…"):
+                                    st.session_state[val_key] = validate_card(
+                                        card_name=fresh.name,
+                                        card_desc=fresh.desc or "",
+                                        acceptance_criteria=fresh.desc or "",
+                                    )
+                                    # Update stored card desc too
+                                    card.desc = fresh.desc
+                                st.rerun()
+                        else:
+                            st.success("✅ Requirements & AC look complete — ready to generate test cases")
+                    else:
+                        st.caption("_(Validation not run yet)_")
+
+
+    # ═══ Tab: Generate Scenarios ════════════════════════════════════════════
+    with tab_gen_scenarios:
+        if not cards:
+            _render_release_setup()
+            st.stop()
+
+        # Refresh local refs from session_state
+        cards = st.session_state.get("rqa_cards", [])
+        tc_store = st.session_state.setdefault("rqa_test_cases", {})
+        approved_store = st.session_state.setdefault("rqa_approved", {})
+        current_release = st.session_state.get("rqa_release", "")
+        if not cards:
+            st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
+            st.stop()
+
+        from pipeline.trello_client import TrelloClient
+        from pipeline.card_processor import (
+            generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
+        )
+        from pipeline.sheets_writer import (
+            append_to_sheet, detect_tab, SHEET_TABS,
+            check_duplicates, parse_test_cases_to_rows,
+        )
+        from pipeline.domain_validator import validate_card, ValidationReport
+        from pathlib import Path
+        sheets_ready = sheets_ok
+
+        approved_count = sum(1 for v in approved_store.values() if v)
+
+        for card in cards:
+            is_approved = approved_store.get(card.id, False)
+            vr: ValidationReport | None = st.session_state.get(f"validation_{card.id}")
+
+            # ── Detect if already processed (AC in desc, TCs in comments) ──
+            existing_tc_comment = next(
+                (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                None,
+            )
+            has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
+            has_existing_tc = bool(existing_tc_comment)
+            already_done    = has_existing_ac and has_existing_tc
+
+            # Expander icon shows validation + approval status
+            val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                vr.overall_status if vr else "", "⚪"
+            )
+            appr_icon = "✅ " if is_approved else ""
+            done_badge = "⚡ " if already_done and not is_approved else ""
+            with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=False):
+                # ── Already processed banner ──────────────────────
+                if already_done and not is_approved:
+                    st.info(
+                        "⚡ **This card was already processed** — AC is in the description "
+                        "and test cases exist in a Trello comment."
+                    )
+                    col_proc1, col_proc2, col_proc3 = st.columns(3)
+                    with col_proc1:
+                        if st.button(
+                            "➡️ Proceed to Automation",
+                            key=f"proceed_{card.id}",
+                            use_container_width=True,
+                            type="primary",
+                            help="Skip AC + TC generation — use existing and go straight to writing automation",
+                        ):
+                            # Pre-fill TC session state from existing Trello comment
+                            tc_store[card.id] = existing_tc_comment
+                            approved_store[card.id] = True
+                            st.session_state[f"ac_saved_{card.id}"] = True
+                            st.rerun()
+                    with col_proc2:
+                        if st.button(
+                            "📋 View existing TCs",
+                            key=f"view_tc_{card.id}",
+                            use_container_width=True,
+                        ):
+                            st.session_state[f"show_existing_tc_{card.id}"] = True
+                    with col_proc3:
+                        if st.button(
+                            "🔄 Regenerate",
+                            key=f"banner_regen_{card.id}",
+                            use_container_width=True,
+                            help="Start fresh — will add new rows to Trello + Sheet",
+                        ):
+                            st.session_state[f"force_regen_{card.id}"] = True
+
+                    if st.session_state.get(f"show_existing_tc_{card.id}"):
+                        with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
+                            st.markdown(existing_tc_comment)
+                            if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                                del st.session_state[f"show_existing_tc_{card.id}"]
+                                st.rerun()
+
+                # For already-processed cards: skip AC/TC steps, show only SAV
+                _processed_only = (already_done and not is_approved
+                        and not st.session_state.get(f"force_regen_{card.id}", False))
+
+                if _processed_only:
+                    continue
+
+                # ── STEP 3: Generate Test Cases ───────────────────
+                _step_header("3", "Generate Test Cases")
+                if vr and vr.overall_status == "FAIL":
+                    st.warning("⚠️ Accuracy issues found above — consider fixing the card before generating. "
+                               "You can still generate if you want to proceed.")
+
+                if card.id not in tc_store:
+                    if st.button("🤖 Generate Test Cases", key=f"gen_{card.id}",
+                                 type="primary" if (not vr or vr.overall_status == "PASS") else "secondary"):
+                        with st.spinner("Claude is writing test cases…"):
+                            tc_store[card.id] = generate_test_cases(card)
+                        st.rerun()
+                else:
+                    # Show generated test cases
+                    tc = tc_store[card.id]
+                    st.markdown(tc)
+
+                    # ── Send TC via Slack (DM or Channel) ────────
+                    _tc_dm_open_key = f"show_dm_tc_{card.id}"
+                    _tc_dm_sent_key = f"tc_dm_sent_{card.id}"
+                    _tc_ch_open_key = f"show_ch_tc_{card.id}"
+                    _tc_ch_sent_key = f"tc_ch_sent_{card.id}"
+
+                    if st.session_state.get(_tc_dm_sent_key):
+                        st.success("✅ Test cases sent via Slack DM!")
+                        if st.button("📨 Send again", key=f"tc_dm_resend_{card.id}"):
+                            st.session_state[_tc_dm_sent_key] = False
+                            st.session_state[_tc_dm_open_key] = True
+                            st.rerun()
+                    elif st.session_state.get(_tc_ch_sent_key):
+                        st.success("✅ Test cases posted to Slack channel!")
+                        if st.button("📢 Post again", key=f"tc_ch_resend_{card.id}"):
+                            st.session_state[_tc_ch_sent_key] = False
+                            st.session_state[_tc_ch_open_key] = True
+                            st.rerun()
+                    else:
+                        _tc_btn_col1, _tc_btn_col2 = st.columns(2)
+                        with _tc_btn_col1:
+                            if st.button(
+                                "📨 Send Test Cases via Slack DM",
+                                key=f"open_dm_tc_{card.id}",
+                                use_container_width=True,
+                            ):
+                                st.session_state[_tc_dm_open_key] = True
+                                st.session_state[_tc_ch_open_key] = False
+                        with _tc_btn_col2:
+                            if st.button(
+                                "📢 Send to Slack Channel",
+                                key=f"open_ch_tc_{card.id}",
+                                use_container_width=True,
+                            ):
+                                st.session_state[_tc_ch_open_key] = True
+                                st.session_state[_tc_dm_open_key] = False
+
+                    # ── Slack Channel panel (TC) ──────────────────
+                    if st.session_state.get(_tc_ch_open_key):
+                        from pipeline.slack_client import (
+                            dm_token_configured, list_slack_channels,
+                            post_content_to_slack_channel,
+                        )
+                        if not dm_token_configured():
+                            st.warning(
+                                "⚠️ SLACK_BOT_TOKEN is not set — channel posting requires a bot token.\n\n"
+                                "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                            )
+                        else:
+                            st.markdown("##### 📢 Post Test Cases to Slack Channel")
+                            _ch_cache_key = "slack_channels_cache"
+                            if _ch_cache_key not in st.session_state:
+                                with st.spinner("Loading channels…"):
+                                    _chs, _ch_err, _ch_note = list_slack_channels()
+                                if _ch_err:
+                                    st.error(f"❌ {_ch_err}")
+                                    _chs = []
+                                st.session_state[_ch_cache_key] = (_chs, _ch_note)
+                            else:
+                                _chs, _ch_note = st.session_state[_ch_cache_key]
+
+                            if _ch_note:
+                                st.caption(f"ℹ️ {_ch_note}")
+
+                            if _chs:
+                                _ch_options = {
+                                    f"{'🔒' if c['is_private'] else '#'} {c['name']}": c["id"]
+                                    for c in _chs
+                                }
+                                _tc_ch_sel_col, _tc_ch_ref_col = st.columns([3, 1])
+                                with _tc_ch_sel_col:
+                                    _tc_ch_sel = st.selectbox(
+                                        "Select channel",
+                                        options=list(_ch_options.keys()),
+                                        key=f"tc_ch_select_{card.id}",
+                                    )
+                                with _tc_ch_ref_col:
+                                    st.markdown("<br>", unsafe_allow_html=True)
+                                    if st.button("🔄 Refresh", key=f"tc_ch_refresh_{card.id}",
+                                                 use_container_width=True):
+                                        del st.session_state[_ch_cache_key]
+                                        st.rerun()
+
+                                if st.button(
+                                    f"📢 Post to {_tc_ch_sel}",
+                                    key=f"tc_ch_send_btn_{card.id}",
+                                    type="primary",
+                                    use_container_width=True,
+                                ):
+                                    _tc_sel_ch_id = _ch_options[_tc_ch_sel]
+                                    with st.spinner("Posting to channel…"):
+                                        _tc_ch_result = post_content_to_slack_channel(
+                                            channel_id=_tc_sel_ch_id,
+                                            card_name=card.name,
+                                            content_text=tc,
+                                            content_label="Test Cases",
+                                            card_url=getattr(card, "url", ""),
+                                        )
+                                    if _tc_ch_result["ok"]:
+                                        st.session_state[_tc_ch_sent_key] = True
+                                        st.session_state[_tc_ch_open_key] = False
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ {_tc_ch_result['error']}")
+
+                    # ── Slack DM panel (TC) ───────────────────────
+                    if st.session_state.get(_tc_dm_open_key):
+                        from pipeline.slack_client import (
+                            dm_token_configured, search_slack_users, send_ac_dm,
+                        )
+                        if not dm_token_configured():
+                            st.warning(
+                                "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
+                                "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                            )
+                        else:
+                            st.markdown("##### 📨 Send Test Cases via DM")
+                            _tc_dm_col1, _tc_dm_col2 = st.columns([3, 1])
+                            with _tc_dm_col1:
+                                _tc_dm_query = st.text_input(
+                                    "Search member",
+                                    placeholder="Search by name — add multiple one by one",
+                                    key=f"tc_dm_search_query_{card.id}",
+                                )
+                            with _tc_dm_col2:
+                                st.markdown("<br>", unsafe_allow_html=True)
+                                _tc_do_search = st.button(
+                                    "🔍 Search",
+                                    key=f"tc_dm_search_btn_{card.id}",
+                                    use_container_width=True,
+                                )
+
+                            _tc_pool_key = f"tc_dm_user_pool_{card.id}"
+                            if _tc_pool_key not in st.session_state:
+                                st.session_state[_tc_pool_key] = {}
+
+                            if _tc_do_search and _tc_dm_query.strip():
+                                with st.spinner("Searching…"):
+                                    _tc_raw = search_slack_users(_tc_dm_query.strip())
+                                _tc_found, _tc_search_err = (
+                                    _tc_raw if isinstance(_tc_raw, tuple)
+                                    else (_tc_raw or [], "")
+                                )
+                                if _tc_search_err:
+                                    st.error(f"❌ {_tc_search_err}")
+                                elif not _tc_found:
+                                    st.info("No users found — try a different name.")
+                                else:
+                                    for u in _tc_found:
+                                        _lbl = f"{u['name']} (@{u['display_name']})"
+                                        st.session_state[_tc_pool_key][_lbl] = u["id"]
+                                    st.success(f"Found {len(_tc_found)} user(s) — select below.")
+
+                            _tc_pool = st.session_state[_tc_pool_key]
+                            if _tc_pool:
+                                _tc_selected_labels = st.multiselect(
+                                    "Select recipients (pick multiple)",
+                                    options=list(_tc_pool.keys()),
+                                    key=f"tc_dm_user_multi_{card.id}",
+                                )
+                                if st.button("✖ Clear search results",
+                                             key=f"tc_dm_clear_{card.id}"):
+                                    st.session_state[_tc_pool_key] = {}
+                                    st.rerun()
+
+                                if st.session_state.get(_tc_dm_sent_key):
+                                    st.success("✅ Test cases sent via Slack DM!")
+                                    if st.button("📨 Send again",
+                                                 key=f"tc_dm_resend_inner_{card.id}"):
+                                        st.session_state[_tc_dm_sent_key] = False
+                                        st.rerun()
+                                elif _tc_selected_labels:
+                                    _tc_selected_uids = [_tc_pool[l] for l in _tc_selected_labels]
+                                    _tc_n = len(_tc_selected_uids)
+                                    if st.button(
+                                        f"📨 Send to {_tc_n} person{'s' if _tc_n > 1 else ''}",
+                                        key=f"tc_dm_send_btn_{card.id}",
+                                        type="primary",
+                                        use_container_width=True,
+                                    ):
+                                        with st.spinner(f"Sending DM to {_tc_n} recipient(s)…"):
+                                            _tc_dm_result = send_ac_dm(
+                                                user_ids=_tc_selected_uids,
+                                                card_name=card.name,
+                                                ac_text=tc,
+                                                content_label="Test Cases",
+                                            )
+                                        if _tc_dm_result["ok"]:
+                                            st.session_state[_tc_dm_sent_key] = True
+                                            st.session_state[_tc_dm_open_key] = False
+                                            st.rerun()
+                                        else:
+                                            _ts, _tf = _tc_dm_result.get("sent", 0), _tc_dm_result.get("failed", 0)
+                                            if _ts:
+                                                st.warning(f"⚠️ Sent to {_ts}, failed for {_tf}: {_tc_dm_result['error']}")
+                                            else:
+                                                st.error(f"❌ DM failed: {_tc_dm_result['error']}")
+                                else:
+                                    st.caption("Select at least one recipient above.")
+
+                    if not is_approved:
+                        st.divider()
+                        _step_header("4", "Review & Approve")
+
+                        # TC type breakdown summary
+                        if sheets_ready:
+                            _all_rows  = parse_test_cases_to_rows(card.name, tc)
+                            _pos_rows  = [r for r in _all_rows if r.tc_type == "Positive"]
+                            _neg_rows  = [r for r in _all_rows if r.tc_type == "Negative"]
+                            _edge_rows = [r for r in _all_rows if r.tc_type == "Edge"]
+                            st.caption(
+                                f"📊 **{len(_all_rows)} total TCs** · "
+                                f"✅ {len(_pos_rows)} positive → Sheet · "
+                                f"❌ {len(_neg_rows)} negative → Trello comment only · "
+                                f"⚠️ {len(_edge_rows)} edge → Trello comment only"
+                            )
+
+                        # Sheet tab selector
+                        if sheets_ready:
+                            suggested_tab = detect_tab(card.name, tc)
+
+                            # Allow QA to create a new tab if needed
+                            _new_tab_key = f"new_tab_name_{card.id}"
+                            _tab_created_key = f"tab_created_{card.id}"
+
+                            _tc_col1, _tc_col2 = st.columns([3, 2])
+                            with _tc_col1:
+                                tab_options = list(SHEET_TABS)
+                                # Add any newly created tab to options immediately
+                                _newly_created = st.session_state.get(_tab_created_key, "")
+                                if _newly_created and _newly_created not in tab_options:
+                                    tab_options.insert(0, _newly_created)
+
+                                _default_tab = _newly_created if _newly_created else suggested_tab
+                                tab_idx = tab_options.index(_default_tab) if _default_tab in tab_options else 0
+                                chosen_tab = st.selectbox(
+                                    "📊 Add to sheet tab",
+                                    tab_options,
+                                    index=tab_idx,
+                                    key=f"tab_{card.id}",
+                                )
+                            with _tc_col2:
+                                _new_tab_name = st.text_input(
+                                    "➕ Or create new tab",
+                                    placeholder="New tab name…",
+                                    key=_new_tab_key,
+                                    label_visibility="collapsed",
+                                )
+                                if st.button("➕ Create Tab", key=f"create_tab_{card.id}",
+                                             use_container_width=True):
+                                    if _new_tab_name.strip():
+                                        from pipeline.sheets_writer import create_new_tab
+                                        with st.spinner(f"Creating tab '{_new_tab_name.strip()}'…"):
+                                            _ct_res = create_new_tab(_new_tab_name.strip())
+                                        if _ct_res["ok"]:
+                                            _action = "already exists" if _ct_res.get("existed") else "created"
+                                            st.success(f"✅ Tab '{_ct_res['tab']}' {_action}! [Open]({_ct_res['sheet_url']})")
+                                            st.session_state[_tab_created_key] = _ct_res["tab"]
+                                            # Add to SHEET_TABS in memory so selectbox shows it
+                                            if _ct_res["tab"] not in SHEET_TABS:
+                                                SHEET_TABS.append(_ct_res["tab"])
+                                            st.rerun()
+                                        else:
+                                            st.error(f"❌ Failed: {_ct_res['error']}")
+                                    else:
+                                        st.warning("Enter a tab name first")
+
+                        # ── Duplicate check (runs when sheet is ready + tab chosen)
+                        if sheets_ready:
+                            dup_key = f"dups_{card.id}_{chosen_tab}"
+                            if dup_key not in st.session_state:
+                                try:
+                                    new_rows = parse_test_cases_to_rows(card.name, tc)
+                                    st.session_state[dup_key] = check_duplicates(new_rows, chosen_tab)
+                                except Exception:
+                                    st.session_state[dup_key] = []
+
+                            dups = st.session_state.get(dup_key, [])
+                            if dups:
+                                with st.expander(f"⚠️ {len(dups)} possible duplicate(s) found in sheet — click to review", expanded=True):
+                                    for d in dups:
+                                        badge = "🔴 Exact match" if d.is_exact else f"🟡 {int(d.score * 100)}% similar"
+                                        st.markdown(
+                                            f"{badge} · Row {d.sheet_row} in **{d.sheet_tab}**\n\n"
+                                            f"- **Existing:** {d.sheet_scenario}\n"
+                                            f"- **New:** {d.new_scenario}"
+                                        )
+                                    st.caption("You can still approve — duplicates won't be blocked. "
+                                               "Use 'Skip duplicates' to only write non-duplicate TCs.")
+                                force_write = st.checkbox(
+                                    "Skip duplicate TCs (only add new ones)",
+                                    key=f"skip_dups_{card.id}",
+                                )
+                            else:
+                                force_write = False
+                                st.caption("✅ No duplicates found in sheet")
+                        else:
+                            dups = []
+                            force_write = False
+
+                        col_approve, col_edit = st.columns([1, 2])
+
+                        with col_approve:
+                            if st.button("✅ Approve & Save", key=f"approve_{card.id}",
+                                         use_container_width=True, type="primary"):
+                                trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
+
+                                # 1. Write to Trello card
+                                with st.spinner("Saving to Trello…"):
+                                    write_test_cases_to_card(
+                                        card.id, tc, trello,
+                                        release=current_release,
+                                        card_name=card.name,
+                                    )
+
+                                # 2. Write to Google Sheets
+                                if sheets_ready:
+                                    with st.spinner(f"Adding to '{chosen_tab}' sheet…"):
+                                        try:
+                                            tc_to_write = tc
+                                            skipped = 0
+                                            if force_write and dups:
+                                                dup_scenarios = {d.new_scenario.lower().strip() for d in dups}
+                                                tc_lines = tc.split("\n")
+                                                filtered_blocks = []
+                                                current_block = []
+                                                skip_block = False
+                                                for line in tc_lines:
+                                                    if line.strip().startswith("### TC-"):
+                                                        if current_block and not skip_block:
+                                                            filtered_blocks.extend(current_block)
+                                                        elif skip_block:
+                                                            skipped += 1
+                                                        current_block = [line]
+                                                        title = line.split(":", 1)[-1].strip().lower()
+                                                        skip_block = any(title in s or s in title for s in dup_scenarios)
+                                                    else:
+                                                        current_block.append(line)
+                                                if current_block and not skip_block:
+                                                    filtered_blocks.extend(current_block)
+                                                elif skip_block:
+                                                    skipped += 1
+                                                tc_to_write = "\n".join(filtered_blocks)
+
+                                            result = append_to_sheet(
+                                                card_name=card.name,
+                                                test_cases_markdown=tc_to_write,
+                                                tab_name=chosen_tab,
+                                                release=current_release,
+                                            )
+                                            skip_msg = f" ({skipped} duplicates skipped)" if skipped else ""
+                                            st.success(
+                                                f"✅ Saved to Trello + "
+                                                f"[{result['rows_added']} rows → '{result['tab']}' sheet{skip_msg}]"
+                                                f"  [Open sheet]({result['sheet_url']})"
+                                            )
+                                        except Exception as e:
+                                            st.warning(f"Trello saved ✅ but Sheets failed: {e}")
+                                else:
+                                    st.success("✅ Saved to Trello card!")
+
+                                approved_store[card.id] = True
+
+                                # 3. Update RAG knowledge base
+                                _ac_for_rag = (
+                                    st.session_state.get(f"ac_suggestion_{card.id}")
+                                    or card.desc or ""
+                                )
+                                rag_result = {"chunks_added": 0, "error": ""}
+                                try:
+                                    from pipeline.rag_updater import update_rag_from_card
+                                    with st.spinner("📚 Updating knowledge base…"):
+                                        rag_result = update_rag_from_card(
+                                            card_id=card.id,
+                                            card_name=card.name,
+                                            description=card.desc or "",
+                                            acceptance_criteria=_ac_for_rag,
+                                            test_cases=tc,
+                                            release=current_release,
+                                        )
+                                    if rag_result["error"]:
+                                        st.warning(f"⚠️ RAG update failed: {rag_result['error']}")
+                                    else:
+                                        st.caption(
+                                            f"📚 Knowledge base updated "
+                                            f"({rag_result['chunks_added']} chunks added)"
+                                        )
+                                except Exception as _rag_exc:
+                                    st.warning(f"⚠️ RAG update skipped: {_rag_exc}")
+
+                                # 4. Save to History
+                                st.session_state.pipeline_runs[card.id] = {
+                                    "card_name":   card.name,
+                                    "card_url":    card.url or "",
+                                    "release":     current_release,
+                                    "test_cases":  tc[:500] + ("…" if len(tc) > 500 else ""),
+                                    "rag_chunks":  rag_result.get("chunks_added", 0),
+                                    "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                }
+                                _save_history(st.session_state.pipeline_runs)
+
+                                st.rerun()
+
+                        with col_edit:
+                            feedback = st.text_input(
+                                "✏️ Request changes",
+                                placeholder="e.g. Add a test case for Saturday delivery, change TC-2 priority to High",
+                                key=f"feedback_{card.id}",
+                            )
+                            if st.button("🔄 Regenerate", key=f"regen_{card.id}",
+                                         use_container_width=True):
+                                if feedback.strip():
+                                    with st.spinner("Claude is updating test cases…"):
+                                        tc_store[card.id] = regenerate_with_feedback(
+                                            card, tc, feedback
+                                        )
+                                    st.rerun()
+                                else:
+                                    st.warning("Type your feedback first")
+                    else:
+                        st.success("✅ Approved and saved to Trello")
+
+                        # ── STEP 5: Write Automation ──────────────
+                        _step_header("5", "Write Automation Code")
+                        auto_key = f"automation_{card.id}"
+                        auto_result = st.session_state.get(auto_key)
+
+                        if auto_result:
+                            # Show result from previous run
+                            kind = auto_result.get("kind", "?")
+                            branch = auto_result.get("branch", "")
+                            files = auto_result.get("files_written", [])
+                            pushed = auto_result.get("pushed", False)
+                            err = auto_result.get("error", "")
+
+                            if err:
+                                st.error(f"❌ Automation failed: {err}")
+                                if st.button("🔄 Retry", key=f"retry_auto_{card.id}"):
+                                    del st.session_state[auto_key]
+                                    st.rerun()
+                            else:
+                                kind_badge = "🆕 New feature" if kind == "new" else "✏️ Existing feature"
+                                agent_steps = auto_result.get("chrome_trace_steps", 0)
+                                agent_badge = f" · 🌐 {agent_steps}-step agent trace" if agent_steps else ""
+                                st.success(f"{kind_badge} · {len(files)} file(s) written{agent_badge}")
+                                for f in files:
+                                    st.caption(f"  📄 `{f}`")
+
+                                # ── TC filter summary ───────────────
+                                tc_summary = auto_result.get("tc_filter_summary", {})
+                                if tc_summary:
+                                    total = tc_summary.get("total", 0)
+                                    kept  = tc_summary.get("kept", 0)
+                                    neg   = tc_summary.get("negative", 0)
+                                    st.caption(
+                                        f"📊 Test cases: {kept}/{total} automated "
+                                        f"(✅ {tc_summary.get('positive',0)} positive · "
+                                        f"⚡ {tc_summary.get('edge',0)} edge · "
+                                        f"🚫 {neg} negative skipped — manual only)"
+                                    )
+                                if branch:
+                                    st.info(f"📦 Branch: `{branch}`")
+
+                                # ── Auto-fix results ────────────────
+                                fix_history = auto_result.get("fix_history", [])
+                                if fix_history:
+                                    fix_passed = auto_result.get("fix_passed", False)
+                                    fix_iters  = auto_result.get("fix_iterations", 0)
+                                    if fix_passed:
+                                        st.success(f"✅ Tests passing after {fix_iters} run(s)")
+                                    else:
+                                        st.error(
+                                            f"❌ Tests still failing after {fix_iters} auto-fix attempt(s) — "
+                                            f"push blocked. Fix locally and push manually."
+                                        )
+                                    with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
+                                        for run in fix_history:
+                                            icon = "✅" if run["passed"] else "❌"
+                                            st.markdown(f"**{icon} Iteration {run['iteration']}**")
+                                            if run.get("fixed_files"):
+                                                st.caption("Fixed: " + ", ".join(f"`{x}`" for x in run["fixed_files"]))
+                                            with st.expander(f"Output (iter {run['iteration']})", expanded=False):
+                                                st.code(run.get("output", "")[-2000:], language="text")
+
+                                push_err = auto_result.get("push_error", "")
+                                if pushed:
+                                    st.success("✅ Pushed to origin")
+                                elif push_err and "skipped" in push_err.lower():
+                                    st.warning(f"⚠️ {push_err}")
+                                elif branch and not pushed:
+                                    col_push, col_rerun = st.columns(2)
+                                    with col_push:
+                                        if st.button("🚀 Push to origin", key=f"push_{card.id}", use_container_width=True):
+                                            from pipeline.automation_writer import _push_branch
+                                            ok, out = _push_branch(branch)
+                                            if ok:
+                                                st.success(f"✅ Pushed `{branch}` to origin!")
+                                                auto_result["pushed"] = True
+                                                st.session_state[auto_key] = auto_result
+                                            else:
+                                                st.error(f"Push failed: {out}")
+                                    with col_rerun:
+                                        if st.button("🔄 Re-run on different branch", key=f"rerun_auto_{card.id}", use_container_width=True):
+                                            del st.session_state[auto_key]
+                                            st.rerun()
+                                else:
+                                    if st.button("🔄 Re-run on different branch", key=f"rerun_auto2_{card.id}"):
+                                        del st.session_state[auto_key]
+                                        st.rerun()
+
+                            # ── QA Retrospective ─────────────────────
+                            st.divider()
+                            _retro_feedback_count = 0
+                            try:
+                                from pipeline.qa_feedback import get_feedback_count
+                                _retro_feedback_count = get_feedback_count()
+                            except Exception:
+                                pass
+                            _retro_label = (
+                                f"📝 QA Retrospective  ·  📚 {_retro_feedback_count} learning(s) in knowledge base"
+                                if _retro_feedback_count > 0
+                                else "📝 QA Retrospective  —  Help the AI improve on the next card"
+                            )
+                            with st.expander(_retro_label, expanded=False):
+                                st.caption(
+                                    "Tell the AI what it missed or got wrong this card. "
+                                    "Your feedback is saved and used automatically on future cards — "
+                                    "no retraining needed."
+                                )
+
+                                # Load any existing saved feedback for this card
+                                _retro_key = f"retro_loaded_{card.id}"
+                                _retro_data_key = f"retro_data_{card.id}"
+                                if _retro_key not in st.session_state:
+                                    try:
+                                        from pipeline.qa_feedback import load_feedback
+                                        _existing_fb = load_feedback(card.id)
+                                    except Exception:
+                                        _existing_fb = None
+                                    st.session_state[_retro_key] = True
+                                    st.session_state[_retro_data_key] = _existing_fb
+
+                                _existing_fb = st.session_state.get(_retro_data_key)
+
+                                if _existing_fb:
+                                    st.success(
+                                        f"✅ Feedback already saved for this card "
+                                        f"(saved {_existing_fb.date}). "
+                                        "Edit below to update."
+                                    )
+
+                                # ── AC Gaps ────────────────────────────
+                                st.markdown("**🔴 AC Gaps** — scenarios the AI missed in Acceptance Criteria")
+                                _ac_default = "\n".join(_existing_fb.ac_misses) if _existing_fb else ""
+                                _ac_input = st.text_area(
+                                    "AC gaps",
+                                    value=_ac_default,
+                                    placeholder=(
+                                        "One per line. e.g.:\n"
+                                        "Missed the case where product weight > 150 lbs triggers LTL freight\n"
+                                        "No scenario for COD payment rejection at checkout"
+                                    ),
+                                    height=110,
+                                    key=f"retro_ac_{card.id}",
+                                    label_visibility="collapsed",
+                                )
+
+                                # ── TC Issues ──────────────────────────
+                                st.markdown("**🟠 TC Issues** — wrong or missing test cases")
+                                _tc_default = "\n".join(_existing_fb.tc_issues) if _existing_fb else ""
+                                _tc_input = st.text_area(
+                                    "TC issues",
+                                    value=_tc_default,
+                                    placeholder=(
+                                        "One per line. e.g.:\n"
+                                        "TC-3 didn't cover the Saturday Delivery edge case\n"
+                                        "Missing negative TC for when AU Post account is suspended"
+                                    ),
+                                    height=100,
+                                    key=f"retro_tc_{card.id}",
+                                    label_visibility="collapsed",
+                                )
+
+                                # ── Automation Issues ───────────────────
+                                st.markdown("**🟡 Automation Issues** — problems in the generated Playwright code")
+                                _auto_default = "\n".join(_existing_fb.automation_issues) if _existing_fb else ""
+                                _auto_input = st.text_area(
+                                    "Automation issues",
+                                    value=_auto_default,
+                                    placeholder=(
+                                        "One per line. e.g.:\n"
+                                        "Label download step doesn't wait for print dialog to close\n"
+                                        "Wrong locator used for the carrier service dropdown\n"
+                                        "Missing assertion after rate calculation"
+                                    ),
+                                    height=100,
+                                    key=f"retro_auto_{card.id}",
+                                    label_visibility="collapsed",
+                                )
+
+                                # ── What Went Well ──────────────────────
+                                st.markdown("**🟢 What Went Well** — positive reinforcement")
+                                _well_default = "\n".join(_existing_fb.what_went_well) if _existing_fb else ""
+                                _well_input = st.text_area(
+                                    "What went well",
+                                    value=_well_default,
+                                    placeholder=(
+                                        "One per line. e.g.:\n"
+                                        "Rate calculation scenarios were spot-on\n"
+                                        "Automation selectors were accurate for this feature"
+                                    ),
+                                    height=80,
+                                    key=f"retro_well_{card.id}",
+                                    label_visibility="collapsed",
+                                )
+
+                                # ── Overall Notes ───────────────────────
+                                _notes_default = _existing_fb.overall_notes if _existing_fb else ""
+                                _notes_input = st.text_area(
+                                    "💬 Overall notes (optional)",
+                                    value=_notes_default,
+                                    placeholder="Any general comment about this card's pipeline run…",
+                                    height=70,
+                                    key=f"retro_notes_{card.id}",
+                                )
+
+                                # ── Save button ─────────────────────────
+                                _retro_save_col, _retro_info_col = st.columns([1, 2])
+                                with _retro_save_col:
+                                    if st.button(
+                                        "💾 Save & Learn",
+                                        key=f"retro_save_{card.id}",
+                                        use_container_width=True,
+                                        type="primary",
+                                    ):
+                                        import datetime as _dt
+                                        # Parse multi-line inputs → clean list
+                                        def _lines(txt):
+                                            return [l.strip() for l in txt.strip().splitlines() if l.strip()]
+
+                                        _has_content = any([
+                                            _ac_input.strip(),
+                                            _tc_input.strip(),
+                                            _auto_input.strip(),
+                                            _well_input.strip(),
+                                            _notes_input.strip(),
+                                        ])
+                                        if not _has_content:
+                                            st.warning("Add at least one piece of feedback before saving.")
+                                        else:
+                                            from pipeline.qa_feedback import QAFeedback, save_feedback as _save_fb
+                                            _fb = QAFeedback(
+                                                card_id=card.id,
+                                                card_name=card.name,
+                                                date=_dt.date.today().isoformat(),
+                                                ac_misses=_lines(_ac_input),
+                                                tc_issues=_lines(_tc_input),
+                                                automation_issues=_lines(_auto_input),
+                                                what_went_well=_lines(_well_input),
+                                                overall_notes=_notes_input.strip(),
+                                            )
+                                            with st.spinner("Saving feedback & updating knowledge base…"):
+                                                _fb_res = _save_fb(_fb)
+
+                                            if _fb_res["ok"]:
+                                                st.session_state[_retro_data_key] = _fb
+                                                st.success(
+                                                    f"✅ Saved! {_fb_res['chunks_added']} chunk(s) added "
+                                                    f"to knowledge base — future cards will learn from this."
+                                                )
+                                            else:
+                                                st.error(f"❌ Save failed: {_fb_res['error']}")
+
+                                with _retro_info_col:
+                                    st.caption(
+                                        "📖 This feedback is embedded into the AI's knowledge base. "
+                                        "Next time a similar feature comes through, Claude will automatically "
+                                        "reference these lessons when writing AC and test cases."
+                                    )
+
+                        else:
+                            # Detection preview
+                            det_key = f"detection_{card.id}"
+                            if det_key not in st.session_state and api_ok:
+                                try:
+                                    from pipeline.feature_detector import detect_feature
+                                    det = detect_feature(card.name, card.desc or "")
+                                    st.session_state[det_key] = det
+                                except Exception:
+                                    pass
+
+                            det = st.session_state.get(det_key)
+                            if det:
+                                kind_icon = "🆕" if det.kind == "new" else "✏️"
+                                st.caption(
+                                    f"{kind_icon} **{det.kind.capitalize()} feature** "
+                                    f"({det.confidence:.0%} confidence) — {det.reasoning[:120]}"
+                                )
+                                if det.related_files:
+                                    st.caption("Related files: " + ", ".join(
+                                        f"`{f}`" for f in det.related_files[:3]
+                                    ))
+
+                            col_auto, col_branch = st.columns([3, 2])
+                            with col_branch:
+                                _NEW_BRANCH_OPTION = "➕ New branch…"
+                                existing_branches = _get_repo_branches()
+                                default_slug = f"automation/{re.sub(r'[^a-z0-9]+', '-', card.name.lower()).strip('-')[:30]}"
+                                branch_options = existing_branches + [_NEW_BRANCH_OPTION]
+                                # Pre-select the auto-slug if it already exists, else "New branch"
+                                default_idx = branch_options.index(default_slug) if default_slug in branch_options else len(branch_options) - 1
+                                selected_branch = st.selectbox(
+                                    "Branch",
+                                    options=branch_options,
+                                    index=default_idx,
+                                    key=f"branch_select_{card.id}",
+                                    label_visibility="collapsed",
+                                )
+                                if selected_branch == _NEW_BRANCH_OPTION:
+                                    auto_branch_input = st.text_input(
+                                        "New branch name",
+                                        value=default_slug,
+                                        key=f"branch_input_{card.id}",
+                                        label_visibility="collapsed",
+                                    )
+                                else:
+                                    auto_branch_input = selected_branch
+                            with col_auto:
+                                dry_auto = st.checkbox("Dry run (preview only)", key=f"dry_auto_{card.id}", value=False)
+                                push_auto = st.checkbox("Push to origin after commit", key=f"push_auto_{card.id}")
+
+                            # ── Step 5a: Chrome Agent option ──────────────────
+                            # Hidden when Smart AC Verifier has already walked the app —
+                            # the verified flows feed directly into the automation writer.
+                            _sav_done = bool(st.session_state.get(f"sav_context_{card.id}"))
+                            if _sav_done:
+                                st.caption(
+                                    "✅ Smart AC Verifier already walked the app — "
+                                    "verified flows will be used for code generation."
+                                )
+                                use_chrome_agent = False
+                            else:
+                                is_new_feature = det and det.kind == "new"
+                                use_chrome_agent = st.checkbox(
+                                    "🌐 Walk app live with Chrome Agent (grounded locators)",
+                                    key=f"use_chrome_{card.id}",
+                                    value=is_new_feature,
+                                    help=(
+                                        "Navigates the real app and captures UI elements. "
+                                        "Run Smart AC Verifier (Step 2b) first for better results — "
+                                        "it walks the app AND verifies each AC scenario."
+                                    ),
+                                )
+
+                            if use_chrome_agent:
+                                # Show Chrome Agent section
+                                trace_key = f"chrome_trace_{card.id}"
+                                trace_result = st.session_state.get(trace_key)
+
+                                if trace_result:
+                                    if trace_result.error:
+                                        # Check if it's the Shopify bot-challenge error
+                                        if "connection-verification" in trace_result.error or "challenge" in trace_result.error.lower():
+                                            st.error("❌ Chrome Agent: Shopify bot-detection blocked the explorer")
+                                            st.warning(
+                                                "**Fix:** Shopify rejected the automated session.\n\n"
+                                                "1. Open a terminal in the automation repo\n"
+                                                "2. Run: `npx playwright test --project=setup --headed`\n"
+                                                "3. A Chrome window opens — log in manually\n"
+                                                "4. Close the window — auth.json is saved automatically\n"
+                                                "5. Click **Explore App** again"
+                                            )
+                                        else:
+                                            st.error(f"❌ Chrome Agent: {trace_result.error}")
+                                    else:
+                                        with st.expander(
+                                            f"🌐 Agent explored {len(trace_result.steps)} steps — {len(trace_result.final_elements.splitlines())} elements captured",
+                                            expanded=False,
+                                        ):
+                                            st.markdown(trace_result.navigation_path)
+                                            unique_els = trace_result.final_elements.splitlines()
+                                            if unique_els:
+                                                st.caption("Elements captured:")
+                                                for el in unique_els[:25]:
+                                                    st.caption(f"  • {el}")
+
+                                # Detect app_path from POM registry for this card
+                                chrome_app_path = ""
+                                try:
+                                    from pipeline.automation_writer import find_pom
+                                    pom_entry = find_pom(card.name)
+                                    if pom_entry:
+                                        chrome_app_path = pom_entry.get("app_path", "")
+                                except Exception:
+                                    pass
+
+                                col_explore, col_apppath = st.columns([2, 3])
+                                with col_apppath:
+                                    chrome_app_path = st.text_input(
+                                        "App path (optional)",
+                                        value=chrome_app_path,
+                                        placeholder="e.g. settings/additional-services",
+                                        key=f"chrome_path_{card.id}",
+                                        label_visibility="collapsed",
+                                    )
+                                with col_explore:
+                                    if st.button(
+                                        "🌐 Explore App",
+                                        key=f"explore_{card.id}",
+                                        use_container_width=True,
+                                        help="Opens Chrome, walks through the feature, captures real UI elements",
+                                    ):
+                                        from pipeline.chrome_agent import explore_with_agent
+                                        with st.spinner("🌐 Chrome Agent exploring the app… (takes ~30s)"):
+                                            trace = explore_with_agent(
+                                                card_name=card.name,
+                                                acceptance_criteria=card.desc or "",
+                                                app_path=chrome_app_path,
+                                                max_steps=12,
+                                            )
+                                        st.session_state[trace_key] = trace
+                                        st.rerun()
+
+                            # ── QA context for this card ──────────────────────
+                            qa_context_key = f"qa_ctx_{card.id}"
+                            qa_context = st.text_area(
+                                "🧪 QA Test Context (optional)",
+                                key=qa_context_key,
+                                placeholder=(
+                                    "Tell the AI specific data to use, e.g.:\n"
+                                    "• Use HS code 123456 on product 'Test Shirt'\n"
+                                    "• Enable Dry Ice with weight 2.5 kg\n"
+                                    "• Use Australia Post Express Post service"
+                                ),
+                                height=90,
+                                help="This context is passed to the AI so generated tests use the right product, settings, or values.",
+                            )
+
+                            # ── Auto-fix toggle ────────────────────────────────
+                            auto_fix_enabled = st.toggle(
+                                "🔄 Auto-run & fix until passing",
+                                key=f"auto_fix_{card.id}",
+                                value=False,
+                                help=(
+                                    "After writing code, automatically run the tests. "
+                                    "If they fail, Claude reads the errors and fixes the code, "
+                                    "then re-runs. Repeats up to 3 times."
+                                ),
+                            )
+
+                            # ── Generate code button ───────────────────────────
+                            # Priority: Smart AC Verifier context > Chrome Agent trace
+                            _sav_ctx    = st.session_state.get(f"sav_context_{card.id}", "")
+                            trace_for_gen = st.session_state.get(f"chrome_trace_{card.id}") if use_chrome_agent else None
+                            chrome_context = (
+                                _sav_ctx                          # Smart AC verified flows first
+                                or (
+                                    trace_for_gen.to_context_string()
+                                    if trace_for_gen and not trace_for_gen.error
+                                    else ""
+                                )
+                            )
+                            if st.button("⚙️ Write Automation Code", key=f"auto_{card.id}",
+                                         use_container_width=True,
+                                         type="primary"):
+                                from pipeline.automation_writer import write_automation
+                                label = (
+                                    "✍️ Generating tests from verified AC flows…"
+                                    if _sav_ctx
+                                    else "✍️ Generating tests from live app trace…"
+                                    if chrome_context
+                                    else "✍️ Claude is writing Playwright tests…"
+                                )
+                                fix_status_placeholder = st.empty()
+                                def _on_fix_progress(iteration, status, output, _ph=fix_status_placeholder):
+                                    _ph.info(f"🔄 **Auto-fix iteration {iteration}/3** — {status}")
+                                with st.spinner(label):
+                                    _tc_md = tc_store.get(card.id, "")
+                                    if not _tc_md:
+                                        # Session was reloaded — recover TCs from Trello comment
+                                        _tc_md = next(
+                                            (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                                            ""
+                                        )
+                                    result = write_automation(
+                                        card_name=card.name,
+                                        test_cases_markdown=_tc_md,
+                                        acceptance_criteria=card.desc or "",
+                                        branch_name=auto_branch_input,
+                                        dry_run=dry_auto,
+                                        push=push_auto,
+                                        chrome_trace_context=chrome_context,
+                                        qa_context=qa_context.strip(),
+                                        auto_fix=auto_fix_enabled and not dry_auto,
+                                        fix_iterations=3,
+                                        on_fix_progress=_on_fix_progress,
+                                    )
+                                    # Record how many agent steps contributed
+                                    if chrome_context and trace_for_gen:
+                                        result["chrome_trace_steps"] = len(trace_for_gen.steps)
+                                st.session_state[auto_key] = result
+                                st.rerun()
+
+
+        # Bulk approve all
+        st.divider()
+        if approved_count < len(cards):
+            if st.button("✅ Approve ALL remaining", type="primary"):
+                trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
+                remaining = [c for c in cards if not approved_store.get(c.id)]
+                rag_total = 0
+                for card in remaining:
+                    if card.id in tc_store:
+                        write_test_cases_to_card(card.id, tc_store[card.id], trello)
+                        approved_store[card.id] = True
+                        # Update RAG for each approved card
+                        _bulk_ac = (
+                            st.session_state.get(f"ac_suggestion_{card.id}")
+                            or card.desc or ""
+                        )
+                        try:
+                            from pipeline.rag_updater import update_rag_from_card
+                            rag_r = update_rag_from_card(
+                                card_id=card.id,
+                                card_name=card.name,
+                                description=card.desc or "",
+                                acceptance_criteria=_bulk_ac,
+                                test_cases=tc_store[card.id],
+                                release=current_release,
+                            )
+                            rag_total += rag_r.get("chunks_added", 0)
+                        except Exception:
+                            rag_r = {"chunks_added": 0}
+                        # Save to History
+                        st.session_state.pipeline_runs[card.id] = {
+                            "card_name":   card.name,
+                            "card_url":    card.url or "",
+                            "release":     current_release,
+                            "test_cases":  tc_store[card.id][:500],
+                            "rag_chunks":  rag_r.get("chunks_added", 0),
+                            "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        }
+                        _save_history(st.session_state.pipeline_runs)
+                st.success(
+                    f"✅ All {len(remaining)} cards saved to Trello! "
+                    f"📚 {rag_total} RAG chunks updated."
+                )
+                st.rerun()
+
+
+    # ═══ Tab: Run Smart Scenarios ══════════════════════════════════════════
+    with tab_run_smart:
+        if not cards:
+            _render_release_setup()
+            st.stop()
+
+        # Refresh local refs from session_state
+        cards = st.session_state.get("rqa_cards", [])
+        tc_store = st.session_state.setdefault("rqa_test_cases", {})
+        approved_store = st.session_state.setdefault("rqa_approved", {})
+        current_release = st.session_state.get("rqa_release", "")
+        if not cards:
+            st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
+            st.stop()
+
+        from pipeline.trello_client import TrelloClient
+        from pipeline.card_processor import (
+            generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
+        )
+        from pipeline.sheets_writer import (
+            append_to_sheet, detect_tab, SHEET_TABS,
+            check_duplicates, parse_test_cases_to_rows,
+        )
+        from pipeline.domain_validator import validate_card, ValidationReport
+        from pathlib import Path
+        sheets_ready = sheets_ok
+
+        for card in cards:
+            is_approved = approved_store.get(card.id, False)
+            vr: ValidationReport | None = st.session_state.get(f"validation_{card.id}")
+
+            # ── Detect if already processed (AC in desc, TCs in comments) ──
+            existing_tc_comment = next(
+                (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                None,
+            )
+            has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
+            has_existing_tc = bool(existing_tc_comment)
+            already_done    = has_existing_ac and has_existing_tc
+
+            # Expander icon shows validation + approval status
+            val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                vr.overall_status if vr else "", "⚪"
+            )
+            appr_icon = "✅ " if is_approved else ""
+            done_badge = "⚡ " if already_done and not is_approved else ""
+            with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=False):
+                # ── Already processed banner ──────────────────────
+                if already_done and not is_approved:
+                    st.info(
+                        "⚡ **This card was already processed** — AC is in the description "
+                        "and test cases exist in a Trello comment."
+                    )
+                    col_proc1, col_proc2, col_proc3 = st.columns(3)
+                    with col_proc1:
+                        if st.button(
+                            "➡️ Proceed to Automation",
+                            key=f"proceed_{card.id}",
+                            use_container_width=True,
+                            type="primary",
+                            help="Skip AC + TC generation — use existing and go straight to writing automation",
+                        ):
+                            # Pre-fill TC session state from existing Trello comment
+                            tc_store[card.id] = existing_tc_comment
+                            approved_store[card.id] = True
+                            st.session_state[f"ac_saved_{card.id}"] = True
+                            st.rerun()
+                    with col_proc2:
+                        if st.button(
+                            "📋 View existing TCs",
+                            key=f"view_tc_{card.id}",
+                            use_container_width=True,
+                        ):
+                            st.session_state[f"show_existing_tc_{card.id}"] = True
+                    with col_proc3:
+                        if st.button(
+                            "🔄 Regenerate",
+                            key=f"banner_regen_{card.id}",
+                            use_container_width=True,
+                            help="Start fresh — will add new rows to Trello + Sheet",
+                        ):
+                            st.session_state[f"force_regen_{card.id}"] = True
+
+                    if st.session_state.get(f"show_existing_tc_{card.id}"):
+                        with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
+                            st.markdown(existing_tc_comment)
+                            if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                                del st.session_state[f"show_existing_tc_{card.id}"]
+                                st.rerun()
+
+                # For already-processed cards: skip AC/TC steps, show only SAV
+                _processed_only = (already_done and not is_approved
+                        and not st.session_state.get(f"force_regen_{card.id}", False))
+
+
+                st.divider()
+
+
+                # ── STEP 2b: Smart AC Verifier (Agentic) ─────────
+                _step_header("2b", "Smart AC Verifier — Claude walks the live app")
+                st.caption(
+                    "Claude opens Chrome, uses automation POM + backend API knowledge "
+                    "to navigate to the right page, interacts with the feature, "
+                    "watches network calls, and gives a per-scenario verdict. "
+                    "If it gets stuck it asks you — you answer, it continues."
+                )
+
+                _sav_key    = f"sav_report_{card.id}"
+                _sav_qa_key = f"sav_qa_{card.id}"
+                sav_report  = st.session_state.get(_sav_key)
+                sav_qa      = st.session_state.get(_sav_qa_key, {})   # {scenario: answer}
+
+                # ── URL + Credentials row ─────────────────────────
+                try:
+                    from pipeline.smart_ac_verifier import get_auto_app_url
+                    _auto_url = get_auto_app_url()
+                except Exception:
+                    _auto_url = ""
+                # Fallback: read AUPOST_APP_URL directly from automation repo .env
+                if not _auto_url:
+                    import config as _cfg
+                    _env_path = Path(_cfg.AUTOMATION_CODEBASE_PATH) / ".env"
+                    if _env_path.exists():
+                        for _line in _env_path.read_text().splitlines():
+                            _k, _, _v = _line.partition("=")
+                            if _k.strip() == "AUPOST_APP_URL" and _v.strip():
+                                _auto_url = _v.strip().strip('"').strip("'")
+                                break
+
+                with st.expander("🔑 App URL & Login Credentials", expanded=False):
+                    _cred_col1, _cred_col2 = st.columns([2, 1])
+                    with _cred_col1:
+                        _sav_app_url_global = st.text_input(
+                            "App URL",
+                            value=st.session_state.get("sav_global_url", _auto_url),
+                            placeholder="https://admin.shopify.com/store/yourstore/apps/...",
+                            key=f"sav_global_url_input_{card.id}",
+                        )
+                        if _sav_app_url_global:
+                            st.session_state["sav_global_url"] = _sav_app_url_global
+                    with _cred_col2:
+                        st.caption("Leave blank to use URL from automation repo .env")
+
+                    # Auto-populate email from automation .env USER_EMAIL
+                    _auto_email = st.session_state.get("shopify_email", "")
+                    if not _auto_email and _env_path.exists():
+                        for _line in _env_path.read_text().splitlines():
+                            _k, _, _v = _line.partition("=")
+                            if _k.strip() == "USER_EMAIL" and _v.strip():
+                                _auto_email = _v.strip().strip('"').strip("'")
+                                break
+
+                    _cr1, _cr2, _cr3 = st.columns([2, 2, 1])
+                    with _cr1:
+                        _email_val = st.text_input(
+                            "Shopify Email",
+                            value=st.session_state.get("shopify_email", _auto_email),
+                            placeholder="you@example.com",
+                            key=f"shopify_email_input_{card.id}",
+                        )
+                        if _email_val:
+                            st.session_state["shopify_email"] = _email_val
+                    with _cr2:
+                        _pass_val = st.text_input(
+                            "Shopify Password",
+                            value=st.session_state.get("shopify_password", ""),
+                            placeholder="••••••••",
+                            type="password",
+                            key=f"shopify_password_input_{card.id}",
+                        )
+                        if _pass_val:
+                            st.session_state["shopify_password"] = _pass_val
+                    with _cr3:
+                        st.caption("Used if auth.json is missing or expired")
+
+                # resolve URL: expander override → per-card field → auto-detect
+                _global_url_override = st.session_state.get("sav_global_url", "")
+
+                # ── Custom scenario override ───────────────────────
+                _custom_sc_key = f"sav_custom_scenario_{card.id}"
+                _custom_scenario = st.text_area(
+                    "🎯 Run a specific scenario (optional)",
+                    key=_custom_sc_key,
+                    placeholder=(
+                        "Leave blank to run all AC scenarios from the card.\n\n"
+                        "Or type one scenario, e.g.:\n"
+                        "Given the order grid is open\n"
+                        "When I enter 'SKU-001' in the SKU filter\n"
+                        "Then only orders containing SKU-001 are shown"
+                    ),
+                    height=110,
+                    help="Claude will verify only this scenario instead of extracting from the full AC.",
+                )
+
+                # ── Complexity selector ────────────────────────────
+                _COMPLEXITY_MAP = {
+                    "🎯 Specific scenario (textbox above)":           -1,
+                    "🟢 Simple  (2-3 scenarios · ~$0.80 · ~4 min)":  3,
+                    "🟡 Medium  (3-4 scenarios · ~$1.20 · ~6 min)":  4,
+                    "🔴 Complex (4-5 scenarios · ~$1.50 · ~8 min)":  5,
+                    "⚫ All scenarios (full run)":                    None,
+                }
+                _complexity_key = f"sav_complexity_{card.id}"
+                _complexity_choice = st.radio(
+                    "Card complexity",
+                    options=list(_COMPLEXITY_MAP.keys()),
+                    index=st.session_state.get(_complexity_key + "_idx", 2),
+                    key=f"sav_complexity_radio_{card.id}",
+                    horizontal=True,
+                    label_visibility="collapsed",
+                )
+                st.session_state[_complexity_key] = _COMPLEXITY_MAP[_complexity_choice]
+                st.session_state[_complexity_key + "_idx"] = list(_COMPLEXITY_MAP.keys()).index(_complexity_choice)
+                _specific_sc_mode = _COMPLEXITY_MAP[_complexity_choice] == -1
+
+                sav_url = _global_url_override or _auto_url
+                col_sav1, col_sav2 = st.columns([2, 3])
+                with col_sav2:
+                    if sav_url:
+                        st.caption(f"🌐 `{sav_url}`")
+                    else:
+                        st.caption("⚠️ No URL set — open App URL & Login Credentials above")
+                with col_sav1:
+                    _sav_running_key  = f"sav_running_{card.id}"
+                    _sav_stop_key     = f"sav_stop_{card.id}"
+                    _sav_result_key   = f"sav_result_{card.id}"
+                    _sav_prog_key     = f"sav_prog_{card.id}"
+                    _is_running       = st.session_state.get(_sav_running_key, False)
+                    if _is_running:
+                        # Show Stop button while thread is running — replaces Run button
+                        if st.button("⏹ Stop", key=f"stop_sav_{card.id}",
+                                     use_container_width=True, type="primary"):
+                            st.session_state[_sav_stop_key] = True
+                        run_sav = False
+                    else:
+                        _custom_active = _specific_sc_mode or bool(st.session_state.get(_custom_sc_key, "").strip())
+                        _run_label = (
+                            "🎯 Run This Scenario" if _custom_active
+                            else "🔁 Re-verify" if sav_report
+                            else "🔍 Run Smart Verification"
+                        )
+                        run_sav = st.button(
+                            _run_label,
+                            key=f"run_sav_{card.id}",
+                            use_container_width=True,
+                            help=(
+                                "Claude opens Chrome, clicks through navigation, "
+                                "interacts with the UI and reports pass/fail"
+                            ),
+                        )
+
+                # ── Live progress while thread is running ──────────
+                if _is_running:
+                    _result = st.session_state.get(_sav_result_key, {})
+                    if _result.get("done"):
+                        # Thread finished — harvest results
+                        st.session_state[_sav_running_key] = False
+                        if _result.get("error"):
+                            if st.session_state.get(_sav_stop_key):
+                                st.warning("⏹ Verification stopped by user.")
+                            else:
+                                st.error(f"❌ Verification error: {_result['error']}")
+                        else:
+                            _new_report = _result["report"]
+                            st.session_state[_sav_key] = _new_report
+                            still_stuck = {s.scenario for s in _new_report.qa_needed}
+                            st.session_state[_sav_qa_key] = {
+                                k: v for k, v in sav_qa.items() if k in still_stuck
+                            }
+                        st.session_state.pop(_sav_result_key, None)
+                        st.session_state.pop(_sav_prog_key, None)
+                        st.rerun()
+                    else:
+                        # Still running — use fragment so only the progress bar
+                        # re-renders every 2 s (no full page reload)
+                        _rk2 = _sav_result_key
+                        _pk2 = _sav_prog_key
+
+                        @st.fragment(run_every=2)
+                        def _sav_live_progress():
+                            _r = st.session_state.get(_rk2, {})
+                            if _r.get("done"):
+                                st.rerun()   # full rerun to harvest results
+                                return
+                            _p   = st.session_state.get(_pk2, {})
+                            _pct = _p.get("pct", 0.0)
+                            _txt = _p.get("text", "🌐 Chrome is open — Claude is verifying AC scenarios…")
+                            st.progress(_pct)
+                            st.info(_txt)
+
+                        _sav_live_progress()
+
+                if run_sav:
+                    if not sav_url.strip():
+                        st.warning("Enter the app URL or set AUPOST_APP_URL in the automation repo .env")
+                    else:
+                        from pipeline.smart_ac_verifier import verify_ac as _verify_ac_fn
+
+                        _custom_sc_val = st.session_state.get(_custom_sc_key, "").strip()
+                        _use_custom = _specific_sc_mode or bool(_custom_sc_val)
+                        if _use_custom and not _custom_sc_val:
+                            st.warning("⚠️ 'Specific scenario' mode selected but textbox is empty — add a scenario above.")
+                            run_sav = False
+                        _ac_text     = _custom_sc_val if _use_custom else (card.desc or "")
+                        _sc_count    = 1 if _use_custom else max(1, sum(
+                            1 for ln in _ac_text.splitlines()
+                            if ln.strip().startswith(("Given","When","Scenario","Then","-"))
+                        ))
+                        # Snapshot mutable values for the thread closure
+                        _sav_url_val   = sav_url.strip()
+                        _card_id_val   = card.id
+                        _card_name_val = card.name
+                        _card_url_val  = card.url
+                        _sav_qa_copy   = dict(sav_qa) if sav_qa else {}
+                        _rk  = _sav_result_key
+                        _pk  = _sav_prog_key
+                        _sk  = _sav_stop_key
+                        _max_sc = 1 if _use_custom else st.session_state.get(_complexity_key)
+                        _sh_email = st.session_state.get("shopify_email", "")
+                        _sh_pass  = st.session_state.get("shopify_password", "")
+
+                        def _sav_progress_cb(
+                            sc_idx, sc_title, step_num, step_desc,
+                            _total=_sc_count, _pk2=_pk,
+                        ):
+                            pct = min(((sc_idx - 1) + (step_num / 10)) / _total, 0.99)
+                            st.session_state[_pk2] = {
+                                "pct":  pct,
+                                "text": (
+                                    f"📋 **Scenario {sc_idx}:** {sc_title[:55]}…  "
+                                    f"⚡ Step {step_num} — {step_desc}"
+                                ),
+                            }
+
+                        def _run_sav_thread(
+                            _url=_sav_url_val, _ac=_ac_text, _cname=_card_name_val,
+                            _cid=_card_id_val, _curl=_card_url_val, _qa=_sav_qa_copy,
+                            _rk2=_rk, _sk2=_sk, _max=_max_sc,
+                            _email=_sh_email, _password=_sh_pass,
+                        ):
+                            try:
+                                report = _verify_ac_fn(
+                                    app_url=_url,
+                                    ac_text=_ac,
+                                    card_name=_cname,
+                                    card_id=_cid,
+                                    card_url=_curl,
+                                    qa_name="QA Team",
+                                    progress_cb=_sav_progress_cb,
+                                    qa_answers=_qa or None,
+                                    auto_report_bugs=True,
+                                    stop_flag=lambda: st.session_state.get(_sk2, False),
+                                    max_scenarios=_max,
+                                    shopify_email=_email,
+                                    shopify_password=_password,
+                                )
+                                st.session_state[_rk2] = {"done": True, "report": report, "error": None}
+                            except Exception as _ex:
+                                st.session_state[_rk2] = {"done": True, "report": None, "error": str(_ex)}
+
+                        # Initialise state BEFORE spawning thread
+                        st.session_state[_sav_running_key] = True
+                        st.session_state[_sav_stop_key]    = False
+                        st.session_state[_sav_result_key]  = {"done": False}
+                        st.session_state.pop(_sav_prog_key, None)
+
+                        _sav_thread = threading.Thread(target=_run_sav_thread, daemon=True)
+                        _sav_thread.start()
+                        # Rerun immediately so the Stop button appears
+                        st.rerun()
+
+                # ── Results ───────────────────────────────────────
+                if sav_report:
+                    _s_icons = {
+                        "pass": "✅", "fail": "❌", "partial": "⚠️",
+                        "skipped": "⏭️", "qa_needed": "🙋", "pending": "⏳",
+                    }
+
+                    # Re-verify button — only show when there are failures
+                    _failed_count = sav_report.failed + len(sav_report.qa_needed)
+                    if _failed_count > 0:
+                        _rev_col1, _rev_col2 = st.columns([2, 3])
+                        with _rev_col1:
+                            _rev_running_key = f"rev_running_{card.id}"
+                            _rev_result_key  = f"rev_result_{card.id}"
+                            _rev_prog_key    = f"rev_prog_{card.id}"
+                            _rev_is_running  = st.session_state.get(_rev_running_key, False)
+
+                            if _rev_is_running:
+                                st.button("⏹ Re-verify running…", key=f"rev_busy_{card.id}",
+                                          use_container_width=True, disabled=True)
+                                # Check if thread finished
+                                _rev_res = st.session_state.get(_rev_result_key, {})
+                                if _rev_res.get("done"):
+                                    st.session_state[_rev_running_key] = False
+                                    if _rev_res.get("error"):
+                                        st.error(f"❌ Re-verify error: {_rev_res['error']}")
+                                    else:
+                                        st.session_state[_sav_key] = _rev_res["report"]
+                                    st.session_state.pop(_rev_result_key, None)
+                                    st.session_state.pop(_rev_prog_key, None)
+                                    st.rerun()
+                                else:
+                                    _rev_prog = st.session_state.get(_rev_prog_key, {})
+                                    if _rev_prog:
+                                        st.progress(_rev_prog.get("pct", 0.0))
+                                        st.info(_rev_prog.get("text", "🔁 Re-verifying failed scenarios…"))
+                                    time.sleep(2)
+                                    st.rerun()
+                            elif st.button(
+                                f"🔁 Re-verify {_failed_count} failed scenario(s)",
+                                key=f"reverify_{card.id}",
+                                help="Re-runs only the failed/partial scenarios — passing ones are kept",
+                            ):
+                                from pipeline.smart_ac_verifier import reverify_failed as _rev_fn
+                                _failed_sc_count = max(1, _failed_count)
+                                _rev_report_snap = sav_report
+                                _rev_url_val     = sav_url.strip() if sav_url else ""
+                                _rev_cid         = card.id
+                                _rev_curl        = card.url
+                                _rrk             = _rev_result_key
+                                _rpk             = _rev_prog_key
+
+                                def _rev_prog_cb(sc_idx, sc_title, step_num, step_desc,
+                                                 _tot=_failed_sc_count, _pk3=_rpk):
+                                    pct = min(((sc_idx-1) + (step_num/10)) / _tot, 0.99)
+                                    st.session_state[_pk3] = {
+                                        "pct":  pct,
+                                        "text": f"🔁 **Re-verifying:** {sc_title[:55]}…  ⚡ {step_desc}",
+                                    }
+
+                                def _run_rev_thread(
+                                    _rpt=_rev_report_snap, _url=_rev_url_val,
+                                    _cid=_rev_cid, _curl=_rev_curl,
+                                    _rrk2=_rrk,
+                                ):
+                                    try:
+                                        updated = _rev_fn(
+                                            report=_rpt,
+                                            app_url=_url,
+                                            card_id=_cid,
+                                            card_url=_curl,
+                                            qa_name="QA Team",
+                                            progress_cb=_rev_prog_cb,
+                                            auto_report_bugs=True,
+                                        )
+                                        st.session_state[_rrk2] = {"done": True, "report": updated, "error": None}
+                                    except Exception as _ex2:
+                                        st.session_state[_rrk2] = {"done": True, "report": None, "error": str(_ex2)}
+
+                                st.session_state[_rev_running_key] = True
+                                st.session_state[_rev_result_key]  = {"done": False}
+                                st.session_state.pop(_rev_prog_key, None)
+                                threading.Thread(target=_run_rev_thread, daemon=True).start()
+                                st.rerun()
+                        with _rev_col2:
+                            st.caption("💡 Ask the developer to fix, then click Re-verify — only failed scenarios will re-run")
+
+                    # Summary bar
+                    _p, _f, _q = (
+                        sav_report.passed,
+                        sav_report.failed,
+                        len(sav_report.qa_needed),
+                    )
+                    _bar_icon = "✅" if _f == 0 and _q == 0 else "❌"
+                    st.markdown(
+                        f"{_bar_icon} **{_p} passed · {_f} failed"
+                        + (f" · {_q} need your input" if _q else "") + "**"
+                    )
+                    if sav_report.summary:
+                        st.info(sav_report.summary)
+
+                    # Per-scenario results
+                    for sv in sav_report.scenarios:
+                        _icon = _s_icons.get(sv.status, "❓")
+                        with st.expander(
+                            f"{_icon} {sv.scenario}",
+                            expanded=(sv.status in ("fail", "partial", "qa_needed")),
+                        ):
+                            if sv.verdict:
+                                _vc = (
+                                    "success" if sv.status == "pass"
+                                    else "error" if sv.status == "fail"
+                                    else "warning"
+                                )
+                                getattr(st, _vc)(sv.verdict)
+
+                            # Steps taken
+                            if sv.steps:
+                                st.caption("**Steps Claude took:**")
+                                for step in sv.steps:
+                                    _si = {"click":"🖱️","fill":"✍️","navigate":"🌐",
+                                           "observe":"👁️","scroll":"↕️","verify":"🔎",
+                                           "qa_needed":"🙋"}.get(step.action, "→")
+                                    _ok = "" if step.success else " ❌"
+                                    _tgt = f" → `{step.target}`" if step.target else ""
+                                    st.caption(f"  {_si} {step.description}{_tgt}{_ok}")
+                                    for nc in step.network_calls[:2]:
+                                        _nc_short = nc.split("/api/")[-1] if "/api/" in nc else nc[-60:]
+                                        st.caption(f"    📡 /api/{_nc_short}")
+
+                            # Bug report result
+                            _br = sv.bug_report
+                            if _br:
+                                if _br.get("ok"):
+                                    _sent = ", ".join(_br.get("sent_to", []))
+                                    st.success(f"🐛 Bug DM sent to developer: **{_sent}**")
+                                    _loc = _br.get("location", {})
+                                    if _loc.get("file_hint"):
+                                        st.caption(f"   📁 Likely in: `{_loc['file_hint']}`")
+                                    if _loc.get("technical_explanation"):
+                                        st.caption(f"   💡 {_loc['technical_explanation']}")
+                                elif _br.get("devs_found", 0) == 0:
+                                    st.warning("🐛 Bug found but no developer assigned to this card in Trello.")
+                                else:
+                                    st.warning(f"🐛 Bug found — DM failed: {_br.get('error', '')}")
+
+                    # ── QA interaction panel ──────────────────────
+                    if sav_report.qa_needed:
+                        st.divider()
+                        st.warning(
+                            f"🙋 Claude needs your help with "
+                            f"**{len(sav_report.qa_needed)} scenario(s)**. "
+                            "Answer below and click **Continue**."
+                        )
+                        for _qi, sv in enumerate(sav_report.qa_needed):
+                            st.markdown(f"**Scenario:** {sv.scenario}")
+                            st.markdown(f"🤖 *Claude says:* {sv.qa_question}")
+                            _ans = st.text_input(
+                                "Your answer",
+                                key=f"sav_qa_input_{card.id}_{_qi}",
+                                placeholder="e.g. It's under Additional Services → Freight tab",
+                            )
+                            if _ans.strip():
+                                sav_qa[sv.scenario] = _ans.strip()
+
+                        if st.button(
+                            "▶ Continue Verification",
+                            key=f"sav_continue_{card.id}",
+                            type="primary",
+                        ):
+                            st.session_state[_sav_qa_key] = sav_qa
+                            # Clear report so it re-runs on next rerun
+                            del st.session_state[_sav_key]
+                            st.rerun()
+
+                    # ── Feed into automation writer ───────────────
+                    if not sav_report.qa_needed:
+                        st.session_state[f"sav_context_{card.id}"] = \
+                            sav_report.to_automation_context()
+
+                st.divider()
+
+                # ── Ask Domain Expert ─────────────────────────────
+                _step_header("2c", "Ask Domain Expert")
+                st.caption(
+                    "Got a doubt while testing? Ask the Domain Expert — "
+                    "it uses AU Post docs + backend + frontend knowledge to answer. "
+                    "If it spots a code bug, it DMs the developer directly."
+                )
+
+                _dex_hist_key = f"dex_history_{card.id}"
+                # Load from disk on first access this session
+                if _dex_hist_key not in st.session_state:
+                    from pipeline.dex_history import load_history as _load_dex
+                    st.session_state[_dex_hist_key] = _load_dex(card.id)
+
+                _dex_history = st.session_state[_dex_hist_key]
+
+                # Show conversation history
+                for _entry in _dex_history:
+                    st.markdown(f"**🙋 You:** {_entry['q']}")
+                    _ans_type = "error" if _entry.get("bug_possible") else "info"
+                    getattr(st, _ans_type)(f"🤖 **Domain Expert:** {_entry['a']}")
+                    if _entry.get("web_searched"):
+                        st.caption("   🌐 Answer enriched with web research")
+                    # Show bug DM result if any
+                    _br = _entry.get("bug_report", {})
+                    if _br and _br.get("ok"):
+                        _sent = ", ".join(_br.get("sent_to", []))
+                        st.success(f"🐛 Bug DM sent to: **{_sent}**")
+                        _loc = _br.get("location", {})
+                        if _loc.get("file_hint"):
+                            st.caption(f"   📁 `{_loc['file_hint']}`")
+                    st.markdown("---")
+
+                # Question input
+                _dex_col1, _dex_col2 = st.columns([5, 1])
+                with _dex_col1:
+                    _dex_q = st.text_input(
+                        "Your question",
+                        placeholder="e.g. Is this eParcel Extra Cover behavior correct? / Why is the API returning 422?",
+                        key=f"dex_q_{card.id}",
+                        label_visibility="collapsed",
+                    )
+                with _dex_col2:
+                    _dex_ask = st.button(
+                        "Ask 🤖",
+                        key=f"dex_ask_{card.id}",
+                        use_container_width=True,
+                        type="primary",
+                    )
+
+                if _dex_ask and _dex_q.strip():
+                    from pipeline.bug_reporter import ask_domain_expert, notify_devs_of_bug
+                    with st.spinner("🤖 Domain Expert is thinking…"):
+                        _dex_result = ask_domain_expert(
+                            question=_dex_q.strip(),
+                            card_name=card.name,
+                            card_desc=card.desc or "",
+                            history=_dex_history,
+                        )
+
+                    _entry = {
+                        "q": _dex_q.strip(),
+                        "a": _dex_result["answer"],
+                        "bug_possible": _dex_result["bug_possible"],
+                        "web_searched": _dex_result["web_searched"],
+                        "bug_report": {},
+                    }
+
+                    # Auto-notify dev if bug detected
+                    if _dex_result["bug_possible"]:
+                        with st.spinner("🐛 Bug suspected — analysing code + notifying developer…"):
+                            _bug_res = notify_devs_of_bug(
+                                card_id=card.id,
+                                card_name=card.name,
+                                card_url=card.url,
+                                bug_description=_dex_q.strip() + "\n\n" + _dex_result["answer"],
+                                scenario="Manual QA question",
+                                qa_name="QA Team",
+                            )
+                        _entry["bug_report"] = _bug_res
+
+                    _dex_history.append(_entry)
+                    st.session_state[_dex_hist_key] = _dex_history
+                    from pipeline.dex_history import save_history as _save_dex
+                    _save_dex(card.id, _dex_history)
+                    st.rerun()
+
+                # Manual bug report button (QA decides it's a bug)
+                if _dex_history:
+                    _last = _dex_history[-1]
+                    if not _last.get("bug_report") or not _last["bug_report"].get("ok"):
+                        if st.button(
+                            "🐛 This is a Bug — Notify Developer",
+                            key=f"dex_bug_{card.id}",
+                            help="Send a DM to the developer assigned to this card",
+                        ):
+                            from pipeline.bug_reporter import notify_devs_of_bug
+                            with st.spinner("Sending bug DM to developer…"):
+                                _bug_res = notify_devs_of_bug(
+                                    card_id=card.id,
+                                    card_name=card.name,
+                                    card_url=card.url,
+                                    bug_description=_last["q"] + "\n\n" + _last["a"],
+                                    scenario="Manual QA report",
+                                    qa_name="QA Team",
+                                )
+                            _dex_history[-1]["bug_report"] = _bug_res
+                            st.session_state[_dex_hist_key] = _dex_history
+                            st.rerun()
+
+                if _dex_history and st.button("🗑 Clear conversation", key=f"dex_clear_{card.id}"):
+                    from pipeline.dex_history import clear_history as _clear_dex
+                    _clear_dex(card.id)
+                    st.session_state[_dex_hist_key] = []
+                    st.rerun()
+
+                st.divider()
+
+    # ═══ Tab: Write Automation Code ═════════════════════════════════════════
+    with tab_write_auto:
+        st.markdown("## ✍️ Write Automation Code")
+        _write_subtabs = st.tabs(["🔗 From Release Card", "✍️ Manual (No Card)"])
+
+        with _write_subtabs[0]:
+            st.caption("Generate Playwright automation for a card from the loaded release.")
+
+            if not cards:
+                _render_release_setup()
+                st.stop()
+
+            cards = st.session_state.get("rqa_cards", [])
+            tc_store = st.session_state.setdefault("rqa_test_cases", {})
+            approved_store = st.session_state.setdefault("rqa_approved", {})
+            current_release = st.session_state.get("rqa_release", "")
+            if not cards:
+                st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
+                st.stop()
+
             from pipeline.trello_client import TrelloClient
             from pipeline.card_processor import (
                 generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
@@ -838,2661 +3267,1566 @@ def main():
             )
             from pipeline.domain_validator import validate_card, ValidationReport
             from pathlib import Path
-
             sheets_ready = sheets_ok
-            if not sheets_ready:
-                st.info("ℹ️ Google Sheets not connected — test cases will save to Trello only. "
-                        "Add `credentials.json` to enable sheet sync.")
 
-            # ── List selector ─────────────────────────────────────────────
-            st.markdown(
-                '<div class="step-chip">① Select Release</div>',
-                unsafe_allow_html=True,
-            )
+            approved_count = sum(1 for v in approved_store.values() if v)
 
-            # ── Active board indicator ─────────────────────────────────
-            _active_board_id   = st.session_state.get("selected_board_id", "")
-            _active_board_name = st.session_state.get("selected_board_name", "")
-            if _active_board_name:
-                st.success(f"📌 Active board: **{_active_board_name}**")
-            elif _active_board_id:
-                st.info(f"📌 Active board ID: `{_active_board_id}` (from .env)")
+            for card in cards:
+                is_approved = approved_store.get(card.id, False)
+                vr: ValidationReport | None = st.session_state.get(f"validation_{card.id}")
 
-            col_refresh, col_boards = st.columns([1, 1])
-            with col_refresh:
-                if st.button("🔄 Refresh Trello lists", use_container_width=True):
-                    st.cache_data.clear()
-                    st.session_state.pop("all_trello_boards", None)
-                    st.rerun()
-            with col_boards:
-                if st.button("📋 List All Boards", use_container_width=True):
-                    with st.spinner("Fetching boards…"):
-                        try:
-                            _boards = TrelloClient.list_all_boards()
-                            st.session_state["all_trello_boards"] = _boards
-                        except Exception as _be:
-                            st.error(f"❌ {_be}")
-
-            if st.session_state.get("all_trello_boards"):
-                _boards = st.session_state["all_trello_boards"]
-                with st.expander(f"📋 Your Trello Boards ({len(_boards)})", expanded=True):
-                    for _b in _boards:
-                        _is_active = _b["id"] == st.session_state.get("selected_board_id")
-                        _bcol1, _bcol2 = st.columns([4, 1])
-                        with _bcol1:
-                            st.markdown(
-                                f"{'✅ ' if _is_active else ''}**{_b['name']}**  \n"
-                                f"ID: `{_b['id']}`  \n"
-                                f"[Open in Trello]({_b['url']})",
-                            )
-                        with _bcol2:
-                            if _is_active:
-                                st.caption("Active")
-                            else:
-                                if st.button("Select", key=f"sel_board_{_b['id']}",
-                                             type="primary", use_container_width=True):
-                                    st.session_state["selected_board_id"]   = _b["id"]
-                                    st.session_state["selected_board_name"] = _b["name"]
-                                    st.session_state.pop("all_trello_boards", None)
-                                    st.cache_data.clear()
-                                    st.rerun()
-                        st.divider()
-
-            col_list, col_load = st.columns([4, 1])
-            with col_list:
-                all_lists = _get_board_lists(st.session_state.get("selected_board_id", ""))
-
-                # Filter toggle — show only QA lists or all lists
-                show_all = st.toggle("Show all lists", value=True)
-                if show_all:
-                    filtered_lists = all_lists
-                else:
-                    filtered_lists = [
-                        (name, lid) for name, lid in all_lists
-                        if "ready for qa" in name.lower() or "qa" in name.lower()
-                    ]
-                    # Auto-fallback: if filter returns nothing, show everything
-                    if not filtered_lists:
-                        filtered_lists = all_lists
-                        st.caption("ℹ️ No QA-filtered lists found — showing all lists.")
-
-                list_names = [name for name, _ in filtered_lists]
-                # Default to first "Ready for QA AU Post" list
-                default_idx = next(
-                    (i for i, n in enumerate(list_names) if ("aupost" in n.lower() or "australia post" in n.lower()) and "ready for qa" in n.lower()), 0
+                # ── Detect if already processed (AC in desc, TCs in comments) ──
+                existing_tc_comment = next(
+                    (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                    None,
                 )
-                if list_names:
-                    selected_list_name = st.selectbox(
-                        f"Select release list ({len(list_names)} lists)",
-                        list_names,
-                        index=default_idx,
-                    )
-                else:
-                    st.info("No lists found on this board. Try enabling 'Show all lists' or select a different board.")
-                    selected_list_name = None
-                selected_list_id = next((lid for name, lid in filtered_lists if name == selected_list_name), "")
+                has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
+                has_existing_tc = bool(existing_tc_comment)
+                already_done    = has_existing_ac and has_existing_tc
 
-            with col_load:
-                st.write("")
-                st.write("")
-                load_btn = st.button("📥 Load Cards", use_container_width=True, disabled=not selected_list_id)
-
-            # -- Release version input (editable, auto-filled from list name)
-            def _extract_release(list_name: str | None) -> str:
-                """Extract release label from list name.
-                'Ready for QA AUPostapp 2.3.115' → 'AUPostapp 2.3.115'
-                """
-                if not list_name:
-                    return ""
-                m = re.search(r'(aupost\w*\s+[\d.]+)', list_name, re.IGNORECASE)
-                if m:
-                    return m.group(1).strip()
-                # fallback: grab any version-like pattern
-                m2 = re.search(r'(v?[\d]+\.[\d]+[\d.]*)', list_name)
-                return m2.group(1) if m2 else list_name
-
-            release_label = st.text_input(
-                "🏷️ Release version",
-                value=_extract_release(selected_list_name),
-                placeholder="e.g. AUPostapp 2.3.115",
-                help="This will be recorded in the 'Release' column of the master sheet",
-            )
-
-            # -- Load cards + auto-validate all
-            if load_btn and selected_list_id:
-                trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
-                cards = trello.get_cards_in_list(selected_list_id)
-                st.session_state["rqa_cards"] = cards
-                st.session_state["rqa_list_name"] = selected_list_name
-                st.session_state["rqa_release"] = release_label
-                st.session_state["rqa_test_cases"] = {}
-                st.session_state["rqa_approved"] = {}
-                # Clear old validations for fresh load
-                for c in cards:
-                    st.session_state.pop(f"validation_{c.id}", None)
-
-                # Auto-validate all cards immediately
-                st.info(f"Loaded {len(cards)} cards from **{selected_list_name}** — running Domain Expert validation…")
-                progress = st.progress(0)
-                for idx, c in enumerate(cards):
-                    with st.spinner(f"🧠 Validating '{c.name}'…"):
-                        st.session_state[f"validation_{c.id}"] = validate_card(
-                            card_name=c.name,
-                            card_desc=c.desc or "",
-                            acceptance_criteria=c.desc or "",
+                # Expander icon shows validation + approval status
+                val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                    vr.overall_status if vr else "", "⚪"
+                )
+                appr_icon = "✅ " if is_approved else ""
+                done_badge = "⚡ " if already_done and not is_approved else ""
+                with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=False):
+                    # ── Already processed banner ──────────────────────
+                    if already_done and not is_approved:
+                        st.info(
+                            "⚡ **This card was already processed** — AC is in the description "
+                            "and test cases exist in a Trello comment."
                         )
-                    progress.progress((idx + 1) / len(cards))
-                progress.empty()
-
-                # Cross-card release analysis (runs after per-card validation)
-                from pipeline.release_analyser import analyse_release, CardSummary as RASummary
-                ra_cards = [
-                    RASummary(card_id=c.id, card_name=c.name, card_desc=c.desc or "")
-                    for c in cards
-                ]
-                with st.spinner("🔬 Running cross-card release analysis…"):
-                    st.session_state["release_analysis"] = analyse_release(
-                        release_name=release_label,
-                        cards=ra_cards,
-                    )
-                st.rerun()
-
-            # -- Main card view
-            if "rqa_cards" in st.session_state and st.session_state["rqa_cards"]:
-                cards = st.session_state["rqa_cards"]
-                tc_store = st.session_state.setdefault("rqa_test_cases", {})
-                approved_store = st.session_state.setdefault("rqa_approved", {})
-                current_release = st.session_state.get("rqa_release", release_label)
-
-                # ── Release health summary ────────────────────────────────
-                st.divider()
-                val_statuses = [
-                    st.session_state.get(f"validation_{c.id}")
-                    for c in cards
-                ]
-                n_pass  = sum(1 for v in val_statuses if v and v.overall_status == "PASS")
-                n_review= sum(1 for v in val_statuses if v and v.overall_status == "NEEDS_REVIEW")
-                n_fail  = sum(1 for v in val_statuses if v and v.overall_status == "FAIL")
-                n_val   = sum(1 for v in val_statuses if v)
-                approved_count = sum(1 for v in approved_store.values() if v)
-
-                hcols = st.columns(5)
-                hcols[0].metric("📦 Total Cards", len(cards))
-                hcols[1].metric("🟢 Pass", n_pass)
-                hcols[2].metric("🟡 Needs Review", n_review)
-                hcols[3].metric("🔴 Fail", n_fail)
-                hcols[4].metric("✅ Approved", approved_count)
-
-                # ── Release Intelligence (cross-card RAG pre-screen) ──────────
-                from pipeline.release_analyser import ReleaseAnalysis
-                ra: ReleaseAnalysis | None = st.session_state.get("release_analysis")
-                if ra and not ra.error:
-                    risk_colors = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}
-                    risk_icon = risk_colors.get(ra.risk_level, "⚪")
-                    with st.expander(
-                        f"{risk_icon} **Release Intelligence — {ra.risk_level} RISK** · {ra.risk_summary}",
-                        expanded=False,
-                    ):
-                        if ra.kb_context_summary:
-                            st.info(f"📚 **KB Context:** {ra.kb_context_summary}")
-
-                        col_left, col_right = st.columns(2)
-
-                        with col_left:
-                            if ra.conflicts:
-                                st.markdown("##### ⚠️ Cross-Card Conflicts")
-                                for conflict in ra.conflicts:
-                                    cards_involved = " & ".join(conflict.get("cards", []))
-                                    area = conflict.get("area", "")
-                                    desc = conflict.get("description", "")
-                                    st.warning(f"**{cards_involved}** — *{area}*\n\n{desc}")
-                            else:
-                                st.success("✅ No cross-card conflicts detected")
-
-                            if ra.coverage_gaps:
-                                st.markdown("##### 🕳️ Coverage Gaps")
-                                for gap in ra.coverage_gaps:
-                                    st.caption(f"• {gap}")
-
-                        with col_right:
-                            if ra.ordering:
-                                st.markdown("##### 📋 Suggested Test Order")
-                                for o in ra.ordering:
-                                    pos = o.get("position", "")
-                                    cname = o.get("card_name", "")
-                                    reason = o.get("reason", "")
-                                    st.markdown(f"**{pos}.** {cname}")
-                                    st.caption(f"   ↳ {reason}")
-
-                        if ra.sources:
-                            st.caption(
-                                "KB sources: " + " · ".join(
-                                    f"[link]({s})" if s.startswith("http") else s
-                                    for s in ra.sources[:4]
-                                )
-                            )
-                elif ra and ra.error:
-                    st.warning(f"⚠️ Release analysis incomplete: {ra.error}")
-
-                st.divider()
-
-                for card in cards:
-                    is_approved = approved_store.get(card.id, False)
-                    vr: ValidationReport | None = st.session_state.get(f"validation_{card.id}")
-
-                    # ── Detect if already processed (AC in desc, TCs in comments) ──
-                    existing_tc_comment = next(
-                        (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
-                        None,
-                    )
-                    has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
-                    has_existing_tc = bool(existing_tc_comment)
-                    already_done    = has_existing_ac and has_existing_tc
-
-                    # Expander icon shows validation + approval status
-                    val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
-                        vr.overall_status if vr else "", "⚪"
-                    )
-                    appr_icon = "✅ " if is_approved else ""
-                    done_badge = "⚡ " if already_done and not is_approved else ""
-                    with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=False):
-
-                        # ── Already processed banner ──────────────────────
-                        if already_done and not is_approved:
-                            st.info(
-                                "⚡ **This card was already processed** — AC is in the description "
-                                "and test cases exist in a Trello comment."
-                            )
-                            col_proc1, col_proc2, col_proc3 = st.columns(3)
-                            with col_proc1:
-                                if st.button(
-                                    "➡️ Proceed to Automation",
-                                    key=f"proceed_{card.id}",
-                                    use_container_width=True,
-                                    type="primary",
-                                    help="Skip AC + TC generation — use existing and go straight to writing automation",
-                                ):
-                                    # Pre-fill TC session state from existing Trello comment
-                                    tc_store[card.id] = existing_tc_comment
-                                    approved_store[card.id] = True
-                                    st.session_state[f"ac_saved_{card.id}"] = True
-                                    st.rerun()
-                            with col_proc2:
-                                if st.button(
-                                    "📋 View existing TCs",
-                                    key=f"view_tc_{card.id}",
-                                    use_container_width=True,
-                                ):
-                                    st.session_state[f"show_existing_tc_{card.id}"] = True
-                            with col_proc3:
-                                if st.button(
-                                    "🔄 Regenerate",
-                                    key=f"banner_regen_{card.id}",
-                                    use_container_width=True,
-                                    help="Start fresh — will add new rows to Trello + Sheet",
-                                ):
-                                    st.session_state[f"force_regen_{card.id}"] = True
-
-                            if st.session_state.get(f"show_existing_tc_{card.id}"):
-                                with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
-                                    st.markdown(existing_tc_comment)
-                                    if st.button("✖ Close", key=f"close_tc_{card.id}"):
-                                        del st.session_state[f"show_existing_tc_{card.id}"]
-                                        st.rerun()
-
-                        # For already-processed cards: skip AC/TC steps, show only SAV
-                        _processed_only = (already_done and not is_approved
-                                and not st.session_state.get(f"force_regen_{card.id}", False))
-
-                        if not _processed_only:
-                            # ── STEP 1: Card Description ──────────────────────
-                            _step_header("1", "Card Requirements")
-                            if card.desc:
-                                st.markdown(card.desc[:600] + ("…" if len(card.desc) > 600 else ""))
-                            else:
-                                st.caption("_(No description on this card)_")
-
-                            # ── STEP 1b: AI Suggest User Story + AC ───────────
-                            _step_header("1b", "AI Suggested User Story & AC")
-                            ac_suggest_key = f"ac_suggestion_{card.id}"
-                            ac_saved_key   = f"ac_saved_{card.id}"
-                            ac_suggestion  = st.session_state.get(ac_suggest_key)
-                            ac_saved       = st.session_state.get(ac_saved_key, False)
-
-                            if ac_saved:
-                                st.success("✅ AI-generated AC saved to Trello description")
-                            elif ac_suggestion:
-                                st.markdown(ac_suggestion)
-                                col_save_ac, col_comment_ac, col_skip_ac, col_dm_ac, col_ch_ac = st.columns(5)
-                                with col_save_ac:
-                                    if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
-                                                 use_container_width=True, type="primary"):
-                                        with st.spinner("Updating Trello description…"):
-                                            TrelloClient(board_id=st.session_state.get("selected_board_id") or None).update_card_description(card.id, ac_suggestion)
-                                            card.desc = ac_suggestion
-                                        st.session_state[ac_saved_key] = True
-                                        st.rerun()
-                                with col_comment_ac:
-                                    if st.button("💬 Add to Trello Comment", key=f"comment_ac_{card.id}",
-                                                 use_container_width=True):
-                                        with st.spinner("Adding comment to Trello card…"):
-                                            TrelloClient(board_id=st.session_state.get("selected_board_id") or None).add_comment(card.id, ac_suggestion)
-                                        st.success("✅ AC added as Trello comment")
-                                with col_skip_ac:
-                                    if st.button("⏭️ Skip — Keep Existing", key=f"skip_ac_{card.id}",
-                                                 use_container_width=True):
-                                        st.session_state[ac_saved_key] = True  # mark done so it collapses
-                                        st.rerun()
-                                with col_dm_ac:
-                                    if st.button("📨 Send via Slack DM", key=f"open_dm_ac_{card.id}",
-                                                 use_container_width=True):
-                                        st.session_state[f"show_dm_ac_{card.id}"] = True
-                                        st.session_state[f"show_ch_ac_{card.id}"] = False
-                                with col_ch_ac:
-                                    if st.button("📢 Send to Channel", key=f"open_ch_ac_{card.id}",
-                                                 use_container_width=True):
-                                        st.session_state[f"show_ch_ac_{card.id}"] = True
-                                        st.session_state[f"show_dm_ac_{card.id}"] = False
-
-                                # ── Slack Channel panel (AC) ────────────────────
-                                if st.session_state.get(f"show_ch_ac_{card.id}"):
-                                    from pipeline.slack_client import (
-                                        dm_token_configured, list_slack_channels,
-                                        post_content_to_slack_channel,
-                                    )
-                                    if not dm_token_configured():
-                                        st.warning(
-                                            "⚠️ SLACK_BOT_TOKEN is not set — channel posting requires a bot token.\n\n"
-                                            "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
-                                        )
-                                    else:
-                                        st.markdown("##### 📢 Post AC to Slack Channel")
-                                        _ch_cache_key = "slack_channels_cache"
-                                        if _ch_cache_key not in st.session_state:
-                                            with st.spinner("Loading channels…"):
-                                                _chs, _ch_err, _ch_note = list_slack_channels()
-                                            if _ch_err:
-                                                st.error(f"❌ {_ch_err}")
-                                                _chs = []
-                                            st.session_state[_ch_cache_key] = (_chs, _ch_note)
-                                        else:
-                                            _chs, _ch_note = st.session_state[_ch_cache_key]
-
-                                        if _ch_note:
-                                            st.caption(f"ℹ️ {_ch_note}")
-
-                                        if _chs:
-                                            _ch_options = {
-                                                f"{'🔒' if c['is_private'] else '#'} {c['name']}": c["id"]
-                                                for c in _chs
-                                            }
-                                            _ac_ch_sel_col, _ac_ch_ref_col = st.columns([3, 1])
-                                            with _ac_ch_sel_col:
-                                                _ac_ch_sel = st.selectbox(
-                                                    "Select channel",
-                                                    options=list(_ch_options.keys()),
-                                                    key=f"ac_ch_select_{card.id}",
-                                                )
-                                            with _ac_ch_ref_col:
-                                                st.markdown("<br>", unsafe_allow_html=True)
-                                                if st.button("🔄 Refresh", key=f"ac_ch_refresh_{card.id}",
-                                                             use_container_width=True):
-                                                    del st.session_state[_ch_cache_key]
-                                                    st.rerun()
-
-                                            _ac_ch_sent_key = f"ac_ch_sent_{card.id}"
-                                            if st.session_state.get(_ac_ch_sent_key):
-                                                st.success("✅ AC posted to channel!")
-                                                if st.button("📢 Post again", key=f"ac_ch_resend_{card.id}"):
-                                                    st.session_state[_ac_ch_sent_key] = False
-                                                    st.rerun()
-                                            else:
-                                                if st.button(
-                                                    f"📢 Post to {_ac_ch_sel}",
-                                                    key=f"ac_ch_send_btn_{card.id}",
-                                                    type="primary",
-                                                    use_container_width=True,
-                                                ):
-                                                    _sel_ch_id = _ch_options[_ac_ch_sel]
-                                                    with st.spinner("Posting to channel…"):
-                                                        _ch_result = post_content_to_slack_channel(
-                                                            channel_id=_sel_ch_id,
-                                                            card_name=card.name,
-                                                            content_text=ac_suggestion,
-                                                            content_label="Acceptance Criteria",
-                                                            card_url=getattr(card, "url", ""),
-                                                        )
-                                                    if _ch_result["ok"]:
-                                                        st.session_state[_ac_ch_sent_key] = True
-                                                        st.rerun()
-                                                    else:
-                                                        st.error(f"❌ {_ch_result['error']}")
-
-                                # ── Slack DM panel (AC) ─────────────────────────
-                                if st.session_state.get(f"show_dm_ac_{card.id}"):
-                                    from pipeline.slack_client import (
-                                        dm_token_configured, search_slack_users, send_ac_dm,
-                                    )
-                                    if not dm_token_configured():
-                                        st.warning(
-                                            "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
-                                            "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
-                                        )
-                                    else:
-                                        st.markdown("##### 📨 Send AC via Slack DM")
-                                        # ── Search row ───────────────────────────
-                                        _dm_col1, _dm_col2 = st.columns([3, 1])
-                                        with _dm_col1:
-                                            _dm_query = st.text_input(
-                                                "Search member",
-                                                placeholder="Search by name — add multiple one by one",
-                                                key=f"dm_search_query_{card.id}",
-                                            )
-                                        with _dm_col2:
-                                            st.markdown("<br>", unsafe_allow_html=True)
-                                            _do_search = st.button(
-                                                "🔍 Search",
-                                                key=f"dm_search_btn_{card.id}",
-                                                use_container_width=True,
-                                            )
-
-                                        # Accumulated user pool (across multiple searches)
-                                        _pool_key = f"dm_user_pool_{card.id}"
-                                        if _pool_key not in st.session_state:
-                                            st.session_state[_pool_key] = {}  # {label: id}
-
-                                        if _do_search and _dm_query.strip():
-                                            with st.spinner("Searching…"):
-                                                _raw = search_slack_users(_dm_query.strip())
-                                            _found, _search_err = (_raw if isinstance(_raw, tuple)
-                                                                   else (_raw or [], ""))
-                                            if _search_err:
-                                                st.error(f"❌ {_search_err}")
-                                            elif not _found:
-                                                st.info("No users found — try a different name.")
-                                            else:
-                                                # Merge into pool
-                                                for u in _found:
-                                                    _lbl = f"{u['name']} (@{u['display_name']})"
-                                                    st.session_state[_pool_key][_lbl] = u["id"]
-                                                st.success(f"Found {len(_found)} user(s) — select below.")
-
-                                        _pool = st.session_state[_pool_key]
-                                        if _pool:
-                                            _selected_labels = st.multiselect(
-                                                "Select recipients (pick multiple)",
-                                                options=list(_pool.keys()),
-                                                key=f"dm_user_multi_{card.id}",
-                                            )
-                                            # Clear pool button
-                                            if st.button("✖ Clear search results",
-                                                         key=f"dm_clear_{card.id}"):
-                                                st.session_state[_pool_key] = {}
-                                                st.rerun()
-
-                                            _dm_sent_key = f"ac_dm_sent_{card.id}"
-                                            if st.session_state.get(_dm_sent_key):
-                                                st.success("✅ AC sent via Slack DM!")
-                                                if st.button("📨 Send again",
-                                                             key=f"dm_resend_{card.id}"):
-                                                    st.session_state[_dm_sent_key] = False
-                                                    st.rerun()
-                                            elif _selected_labels:
-                                                _selected_uids = [_pool[l] for l in _selected_labels]
-                                                _n = len(_selected_uids)
-                                                if st.button(
-                                                    f"📨 Send to {_n} person{'s' if _n > 1 else ''}",
-                                                    key=f"dm_send_btn_{card.id}",
-                                                    type="primary",
-                                                    use_container_width=True,
-                                                ):
-                                                    with st.spinner(f"Sending DM to {_n} recipient(s)…"):
-                                                        _dm_result = send_ac_dm(
-                                                            user_ids=_selected_uids,
-                                                            card_name=card.name,
-                                                            ac_text=ac_suggestion,
-                                                            content_label="Acceptance Criteria",
-                                                        )
-                                                    if _dm_result["ok"]:
-                                                        st.session_state[_dm_sent_key] = True
-                                                        st.rerun()
-                                                    else:
-                                                        _s, _f = _dm_result.get("sent",0), _dm_result.get("failed",0)
-                                                        if _s:
-                                                            st.warning(f"⚠️ Sent to {_s}, failed for {_f}: {_dm_result['error']}")
-                                                        else:
-                                                            st.error(f"❌ DM failed: {_dm_result['error']}")
-                                            else:
-                                                st.caption("Select at least one recipient above.")
-                            else:
-                                if st.button("🤖 Generate User Story & AC", key=f"gen_ac_{card.id}"):
-                                    from pipeline.card_processor import generate_acceptance_criteria
-                                    raw = f"{card.name}\n\n{card.desc or ''}".strip()
-                                    with st.spinner("Claude is generating User Story & AC…"):
-                                        st.session_state[ac_suggest_key] = generate_acceptance_criteria(
-                                            raw,
-                                            attachments=card.attachments,
-                                            checklists=card.checklists,
-                                        )
-                                    st.rerun()
-
-                            # ── STEP 2: Domain Expert Validation ──────────────
-                            _step_header("2", "Domain Expert Validation")
-                            val_key = f"validation_{card.id}"
-
-                            if vr:
-                                status_color = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
-                                    vr.overall_status, "⚪"
-                                )
-                                st.markdown(f"{status_color} **{vr.overall_status}** — {vr.summary}")
-
-                                # KB insights
-                                if vr.kb_insights:
-                                    with st.expander("📚 Knowledge Base context", expanded=False):
-                                        st.markdown(vr.kb_insights)
-                                        if vr.sources:
-                                            st.caption("Sources: " + " · ".join(
-                                                f"[link]({s})" if s.startswith("http") else s
-                                                for s in vr.sources[:4]
-                                            ))
-
-                                # Issues grid
-                                has_issues = any([vr.requirement_gaps, vr.ac_gaps,
-                                                  vr.accuracy_issues, vr.suggestions])
-                                if has_issues:
-                                    c1, c2 = st.columns(2)
-                                    with c1:
-                                        if vr.accuracy_issues:
-                                            st.error("**❌ Accuracy Issues**")
-                                            for issue in vr.accuracy_issues:
-                                                st.markdown(f"- {issue}")
-                                        if vr.requirement_gaps:
-                                            st.warning("**⚠️ Requirement Gaps**")
-                                            for gap in vr.requirement_gaps:
-                                                st.markdown(f"- {gap}")
-                                    with c2:
-                                        if vr.ac_gaps:
-                                            st.warning("**📋 Missing AC Scenarios**")
-                                            for gap in vr.ac_gaps:
-                                                st.markdown(f"- {gap}")
-                                        if vr.suggestions:
-                                            st.info("**💡 Suggestions**")
-                                            for s in vr.suggestions:
-                                                st.markdown(f"- {s}")
-
-                                    # Fix + Re-validate
-                                    st.caption("👆 Fix the card on Trello, then re-validate below")
-                                    if st.button("🔄 Re-validate after fix", key=f"reval_{card.id}"):
-                                        # Refresh card from Trello + re-run validation
-                                        with st.spinner("Fetching updated card from Trello…"):
-                                            fresh = TrelloClient(board_id=st.session_state.get("selected_board_id") or None).get_card(card.id)
-                                        with st.spinner("Re-validating…"):
-                                            st.session_state[val_key] = validate_card(
-                                                card_name=fresh.name,
-                                                card_desc=fresh.desc or "",
-                                                acceptance_criteria=fresh.desc or "",
-                                            )
-                                            # Update stored card desc too
-                                            card.desc = fresh.desc
-                                        st.rerun()
-                                else:
-                                    st.success("✅ Requirements & AC look complete — ready to generate test cases")
-                            else:
-                                st.caption("_(Validation not run yet)_")
-
-                        st.divider()
-
-                        # ── STEP 2b: Smart AC Verifier (Agentic) ─────────
-                        _step_header("2b", "Smart AC Verifier — Claude walks the live app")
-                        st.caption(
-                            "Claude opens Chrome, uses automation POM + backend API knowledge "
-                            "to navigate to the right page, interacts with the feature, "
-                            "watches network calls, and gives a per-scenario verdict. "
-                            "If it gets stuck it asks you — you answer, it continues."
-                        )
-
-                        _sav_key    = f"sav_report_{card.id}"
-                        _sav_qa_key = f"sav_qa_{card.id}"
-                        sav_report  = st.session_state.get(_sav_key)
-                        sav_qa      = st.session_state.get(_sav_qa_key, {})   # {scenario: answer}
-
-                        # ── URL + Credentials row ─────────────────────────
-                        try:
-                            from pipeline.smart_ac_verifier import get_auto_app_url
-                            _auto_url = get_auto_app_url()
-                        except Exception:
-                            _auto_url = ""
-                        # Fallback: read AUPOST_APP_URL directly from automation repo .env
-                        if not _auto_url:
-                            import config as _cfg
-                            _env_path = Path(_cfg.AUTOMATION_CODEBASE_PATH) / ".env"
-                            if _env_path.exists():
-                                for _line in _env_path.read_text().splitlines():
-                                    _k, _, _v = _line.partition("=")
-                                    if _k.strip() == "AUPOST_APP_URL" and _v.strip():
-                                        _auto_url = _v.strip().strip('"').strip("'")
-                                        break
-
-                        with st.expander("🔑 App URL & Login Credentials", expanded=False):
-                            _cred_col1, _cred_col2 = st.columns([2, 1])
-                            with _cred_col1:
-                                _sav_app_url_global = st.text_input(
-                                    "App URL",
-                                    value=st.session_state.get("sav_global_url", _auto_url),
-                                    placeholder="https://admin.shopify.com/store/yourstore/apps/...",
-                                    key=f"sav_global_url_input_{card.id}",
-                                )
-                                if _sav_app_url_global:
-                                    st.session_state["sav_global_url"] = _sav_app_url_global
-                            with _cred_col2:
-                                st.caption("Leave blank to use URL from automation repo .env")
-
-                            # Auto-populate email from automation .env USER_EMAIL
-                            _auto_email = st.session_state.get("shopify_email", "")
-                            if not _auto_email and _env_path.exists():
-                                for _line in _env_path.read_text().splitlines():
-                                    _k, _, _v = _line.partition("=")
-                                    if _k.strip() == "USER_EMAIL" and _v.strip():
-                                        _auto_email = _v.strip().strip('"').strip("'")
-                                        break
-
-                            _cr1, _cr2, _cr3 = st.columns([2, 2, 1])
-                            with _cr1:
-                                _email_val = st.text_input(
-                                    "Shopify Email",
-                                    value=st.session_state.get("shopify_email", _auto_email),
-                                    placeholder="you@example.com",
-                                    key=f"shopify_email_input_{card.id}",
-                                )
-                                if _email_val:
-                                    st.session_state["shopify_email"] = _email_val
-                            with _cr2:
-                                _pass_val = st.text_input(
-                                    "Shopify Password",
-                                    value=st.session_state.get("shopify_password", ""),
-                                    placeholder="••••••••",
-                                    type="password",
-                                    key=f"shopify_password_input_{card.id}",
-                                )
-                                if _pass_val:
-                                    st.session_state["shopify_password"] = _pass_val
-                            with _cr3:
-                                st.caption("Used if auth.json is missing or expired")
-
-                        # resolve URL: expander override → per-card field → auto-detect
-                        _global_url_override = st.session_state.get("sav_global_url", "")
-
-                        # ── Custom scenario override ───────────────────────
-                        _custom_sc_key = f"sav_custom_scenario_{card.id}"
-                        _custom_scenario = st.text_area(
-                            "🎯 Run a specific scenario (optional)",
-                            key=_custom_sc_key,
-                            placeholder=(
-                                "Leave blank to run all AC scenarios from the card.\n\n"
-                                "Or type one scenario, e.g.:\n"
-                                "Given the order grid is open\n"
-                                "When I enter 'SKU-001' in the SKU filter\n"
-                                "Then only orders containing SKU-001 are shown"
-                            ),
-                            height=110,
-                            help="Claude will verify only this scenario instead of extracting from the full AC.",
-                        )
-
-                        # ── Complexity selector ────────────────────────────
-                        _COMPLEXITY_MAP = {
-                            "🎯 Specific scenario (textbox above)":           -1,
-                            "🟢 Simple  (2-3 scenarios · ~$0.80 · ~4 min)":  3,
-                            "🟡 Medium  (3-4 scenarios · ~$1.20 · ~6 min)":  4,
-                            "🔴 Complex (4-5 scenarios · ~$1.50 · ~8 min)":  5,
-                            "⚫ All scenarios (full run)":                    None,
-                        }
-                        _complexity_key = f"sav_complexity_{card.id}"
-                        _complexity_choice = st.radio(
-                            "Card complexity",
-                            options=list(_COMPLEXITY_MAP.keys()),
-                            index=st.session_state.get(_complexity_key + "_idx", 2),
-                            key=f"sav_complexity_radio_{card.id}",
-                            horizontal=True,
-                            label_visibility="collapsed",
-                        )
-                        st.session_state[_complexity_key] = _COMPLEXITY_MAP[_complexity_choice]
-                        st.session_state[_complexity_key + "_idx"] = list(_COMPLEXITY_MAP.keys()).index(_complexity_choice)
-                        _specific_sc_mode = _COMPLEXITY_MAP[_complexity_choice] == -1
-
-                        sav_url = _global_url_override or _auto_url
-                        col_sav1, col_sav2 = st.columns([2, 3])
-                        with col_sav2:
-                            if sav_url:
-                                st.caption(f"🌐 `{sav_url}`")
-                            else:
-                                st.caption("⚠️ No URL set — open App URL & Login Credentials above")
-                        with col_sav1:
-                            _sav_running_key  = f"sav_running_{card.id}"
-                            _sav_stop_key     = f"sav_stop_{card.id}"
-                            _sav_result_key   = f"sav_result_{card.id}"
-                            _sav_prog_key     = f"sav_prog_{card.id}"
-                            _is_running       = st.session_state.get(_sav_running_key, False)
-                            if _is_running:
-                                # Show Stop button while thread is running — replaces Run button
-                                if st.button("⏹ Stop", key=f"stop_sav_{card.id}",
-                                             use_container_width=True, type="primary"):
-                                    st.session_state[_sav_stop_key] = True
-                                run_sav = False
-                            else:
-                                _custom_active = _specific_sc_mode or bool(st.session_state.get(_custom_sc_key, "").strip())
-                                _run_label = (
-                                    "🎯 Run This Scenario" if _custom_active
-                                    else "🔁 Re-verify" if sav_report
-                                    else "🔍 Run Smart Verification"
-                                )
-                                run_sav = st.button(
-                                    _run_label,
-                                    key=f"run_sav_{card.id}",
-                                    use_container_width=True,
-                                    help=(
-                                        "Claude opens Chrome, clicks through navigation, "
-                                        "interacts with the UI and reports pass/fail"
-                                    ),
-                                )
-
-                        # ── Live progress while thread is running ──────────
-                        if _is_running:
-                            _result = st.session_state.get(_sav_result_key, {})
-                            if _result.get("done"):
-                                # Thread finished — harvest results
-                                st.session_state[_sav_running_key] = False
-                                if _result.get("error"):
-                                    if st.session_state.get(_sav_stop_key):
-                                        st.warning("⏹ Verification stopped by user.")
-                                    else:
-                                        st.error(f"❌ Verification error: {_result['error']}")
-                                else:
-                                    _new_report = _result["report"]
-                                    st.session_state[_sav_key] = _new_report
-                                    still_stuck = {s.scenario for s in _new_report.qa_needed}
-                                    st.session_state[_sav_qa_key] = {
-                                        k: v for k, v in sav_qa.items() if k in still_stuck
-                                    }
-                                st.session_state.pop(_sav_result_key, None)
-                                st.session_state.pop(_sav_prog_key, None)
-                                st.rerun()
-                            else:
-                                # Still running — use fragment so only the progress bar
-                                # re-renders every 2 s (no full page reload)
-                                _rk2 = _sav_result_key
-                                _pk2 = _sav_prog_key
-
-                                @st.fragment(run_every=2)
-                                def _sav_live_progress():
-                                    _r = st.session_state.get(_rk2, {})
-                                    if _r.get("done"):
-                                        st.rerun()   # full rerun to harvest results
-                                        return
-                                    _p   = st.session_state.get(_pk2, {})
-                                    _pct = _p.get("pct", 0.0)
-                                    _txt = _p.get("text", "🌐 Chrome is open — Claude is verifying AC scenarios…")
-                                    st.progress(_pct)
-                                    st.info(_txt)
-
-                                _sav_live_progress()
-
-                        if run_sav:
-                            if not sav_url.strip():
-                                st.warning("Enter the app URL or set AUPOST_APP_URL in the automation repo .env")
-                            else:
-                                from pipeline.smart_ac_verifier import verify_ac as _verify_ac_fn
-
-                                _custom_sc_val = st.session_state.get(_custom_sc_key, "").strip()
-                                _use_custom = _specific_sc_mode or bool(_custom_sc_val)
-                                if _use_custom and not _custom_sc_val:
-                                    st.warning("⚠️ 'Specific scenario' mode selected but textbox is empty — add a scenario above.")
-                                    run_sav = False
-                                _ac_text     = _custom_sc_val if _use_custom else (card.desc or "")
-                                _sc_count    = 1 if _use_custom else max(1, sum(
-                                    1 for ln in _ac_text.splitlines()
-                                    if ln.strip().startswith(("Given","When","Scenario","Then","-"))
-                                ))
-                                # Snapshot mutable values for the thread closure
-                                _sav_url_val   = sav_url.strip()
-                                _card_id_val   = card.id
-                                _card_name_val = card.name
-                                _card_url_val  = card.url
-                                _sav_qa_copy   = dict(sav_qa) if sav_qa else {}
-                                _rk  = _sav_result_key
-                                _pk  = _sav_prog_key
-                                _sk  = _sav_stop_key
-                                _max_sc = 1 if _use_custom else st.session_state.get(_complexity_key)
-                                _sh_email = st.session_state.get("shopify_email", "")
-                                _sh_pass  = st.session_state.get("shopify_password", "")
-
-                                def _sav_progress_cb(
-                                    sc_idx, sc_title, step_num, step_desc,
-                                    _total=_sc_count, _pk2=_pk,
-                                ):
-                                    pct = min(((sc_idx - 1) + (step_num / 10)) / _total, 0.99)
-                                    st.session_state[_pk2] = {
-                                        "pct":  pct,
-                                        "text": (
-                                            f"📋 **Scenario {sc_idx}:** {sc_title[:55]}…  "
-                                            f"⚡ Step {step_num} — {step_desc}"
-                                        ),
-                                    }
-
-                                def _run_sav_thread(
-                                    _url=_sav_url_val, _ac=_ac_text, _cname=_card_name_val,
-                                    _cid=_card_id_val, _curl=_card_url_val, _qa=_sav_qa_copy,
-                                    _rk2=_rk, _sk2=_sk, _max=_max_sc,
-                                    _email=_sh_email, _password=_sh_pass,
-                                ):
-                                    try:
-                                        report = _verify_ac_fn(
-                                            app_url=_url,
-                                            ac_text=_ac,
-                                            card_name=_cname,
-                                            card_id=_cid,
-                                            card_url=_curl,
-                                            qa_name="QA Team",
-                                            progress_cb=_sav_progress_cb,
-                                            qa_answers=_qa or None,
-                                            auto_report_bugs=True,
-                                            stop_flag=lambda: st.session_state.get(_sk2, False),
-                                            max_scenarios=_max,
-                                            shopify_email=_email,
-                                            shopify_password=_password,
-                                        )
-                                        st.session_state[_rk2] = {"done": True, "report": report, "error": None}
-                                    except Exception as _ex:
-                                        st.session_state[_rk2] = {"done": True, "report": None, "error": str(_ex)}
-
-                                # Initialise state BEFORE spawning thread
-                                st.session_state[_sav_running_key] = True
-                                st.session_state[_sav_stop_key]    = False
-                                st.session_state[_sav_result_key]  = {"done": False}
-                                st.session_state.pop(_sav_prog_key, None)
-
-                                _sav_thread = threading.Thread(target=_run_sav_thread, daemon=True)
-                                _sav_thread.start()
-                                # Rerun immediately so the Stop button appears
-                                st.rerun()
-
-                        # ── Results ───────────────────────────────────────
-                        if sav_report:
-                            _s_icons = {
-                                "pass": "✅", "fail": "❌", "partial": "⚠️",
-                                "skipped": "⏭️", "qa_needed": "🙋", "pending": "⏳",
-                            }
-
-                            # Re-verify button — only show when there are failures
-                            _failed_count = sav_report.failed + len(sav_report.qa_needed)
-                            if _failed_count > 0:
-                                _rev_col1, _rev_col2 = st.columns([2, 3])
-                                with _rev_col1:
-                                    _rev_running_key = f"rev_running_{card.id}"
-                                    _rev_result_key  = f"rev_result_{card.id}"
-                                    _rev_prog_key    = f"rev_prog_{card.id}"
-                                    _rev_is_running  = st.session_state.get(_rev_running_key, False)
-
-                                    if _rev_is_running:
-                                        st.button("⏹ Re-verify running…", key=f"rev_busy_{card.id}",
-                                                  use_container_width=True, disabled=True)
-                                        # Check if thread finished
-                                        _rev_res = st.session_state.get(_rev_result_key, {})
-                                        if _rev_res.get("done"):
-                                            st.session_state[_rev_running_key] = False
-                                            if _rev_res.get("error"):
-                                                st.error(f"❌ Re-verify error: {_rev_res['error']}")
-                                            else:
-                                                st.session_state[_sav_key] = _rev_res["report"]
-                                            st.session_state.pop(_rev_result_key, None)
-                                            st.session_state.pop(_rev_prog_key, None)
-                                            st.rerun()
-                                        else:
-                                            _rev_prog = st.session_state.get(_rev_prog_key, {})
-                                            if _rev_prog:
-                                                st.progress(_rev_prog.get("pct", 0.0))
-                                                st.info(_rev_prog.get("text", "🔁 Re-verifying failed scenarios…"))
-                                            time.sleep(2)
-                                            st.rerun()
-                                    elif st.button(
-                                        f"🔁 Re-verify {_failed_count} failed scenario(s)",
-                                        key=f"reverify_{card.id}",
-                                        help="Re-runs only the failed/partial scenarios — passing ones are kept",
-                                    ):
-                                        from pipeline.smart_ac_verifier import reverify_failed as _rev_fn
-                                        _failed_sc_count = max(1, _failed_count)
-                                        _rev_report_snap = sav_report
-                                        _rev_url_val     = sav_url.strip() if sav_url else ""
-                                        _rev_cid         = card.id
-                                        _rev_curl        = card.url
-                                        _rrk             = _rev_result_key
-                                        _rpk             = _rev_prog_key
-
-                                        def _rev_prog_cb(sc_idx, sc_title, step_num, step_desc,
-                                                         _tot=_failed_sc_count, _pk3=_rpk):
-                                            pct = min(((sc_idx-1) + (step_num/10)) / _tot, 0.99)
-                                            st.session_state[_pk3] = {
-                                                "pct":  pct,
-                                                "text": f"🔁 **Re-verifying:** {sc_title[:55]}…  ⚡ {step_desc}",
-                                            }
-
-                                        def _run_rev_thread(
-                                            _rpt=_rev_report_snap, _url=_rev_url_val,
-                                            _cid=_rev_cid, _curl=_rev_curl,
-                                            _rrk2=_rrk,
-                                        ):
-                                            try:
-                                                updated = _rev_fn(
-                                                    report=_rpt,
-                                                    app_url=_url,
-                                                    card_id=_cid,
-                                                    card_url=_curl,
-                                                    qa_name="QA Team",
-                                                    progress_cb=_rev_prog_cb,
-                                                    auto_report_bugs=True,
-                                                )
-                                                st.session_state[_rrk2] = {"done": True, "report": updated, "error": None}
-                                            except Exception as _ex2:
-                                                st.session_state[_rrk2] = {"done": True, "report": None, "error": str(_ex2)}
-
-                                        st.session_state[_rev_running_key] = True
-                                        st.session_state[_rev_result_key]  = {"done": False}
-                                        st.session_state.pop(_rev_prog_key, None)
-                                        threading.Thread(target=_run_rev_thread, daemon=True).start()
-                                        st.rerun()
-                                with _rev_col2:
-                                    st.caption("💡 Ask the developer to fix, then click Re-verify — only failed scenarios will re-run")
-
-                            # Summary bar
-                            _p, _f, _q = (
-                                sav_report.passed,
-                                sav_report.failed,
-                                len(sav_report.qa_needed),
-                            )
-                            _bar_icon = "✅" if _f == 0 and _q == 0 else "❌"
-                            st.markdown(
-                                f"{_bar_icon} **{_p} passed · {_f} failed"
-                                + (f" · {_q} need your input" if _q else "") + "**"
-                            )
-                            if sav_report.summary:
-                                st.info(sav_report.summary)
-
-                            # Per-scenario results
-                            for sv in sav_report.scenarios:
-                                _icon = _s_icons.get(sv.status, "❓")
-                                with st.expander(
-                                    f"{_icon} {sv.scenario}",
-                                    expanded=(sv.status in ("fail", "partial", "qa_needed")),
-                                ):
-                                    if sv.verdict:
-                                        _vc = (
-                                            "success" if sv.status == "pass"
-                                            else "error" if sv.status == "fail"
-                                            else "warning"
-                                        )
-                                        getattr(st, _vc)(sv.verdict)
-
-                                    # Steps taken
-                                    if sv.steps:
-                                        st.caption("**Steps Claude took:**")
-                                        for step in sv.steps:
-                                            _si = {"click":"🖱️","fill":"✍️","navigate":"🌐",
-                                                   "observe":"👁️","scroll":"↕️","verify":"🔎",
-                                                   "qa_needed":"🙋"}.get(step.action, "→")
-                                            _ok = "" if step.success else " ❌"
-                                            _tgt = f" → `{step.target}`" if step.target else ""
-                                            st.caption(f"  {_si} {step.description}{_tgt}{_ok}")
-                                            for nc in step.network_calls[:2]:
-                                                _nc_short = nc.split("/api/")[-1] if "/api/" in nc else nc[-60:]
-                                                st.caption(f"    📡 /api/{_nc_short}")
-
-                                    # Bug report result
-                                    _br = sv.bug_report
-                                    if _br:
-                                        if _br.get("ok"):
-                                            _sent = ", ".join(_br.get("sent_to", []))
-                                            st.success(f"🐛 Bug DM sent to developer: **{_sent}**")
-                                            _loc = _br.get("location", {})
-                                            if _loc.get("file_hint"):
-                                                st.caption(f"   📁 Likely in: `{_loc['file_hint']}`")
-                                            if _loc.get("technical_explanation"):
-                                                st.caption(f"   💡 {_loc['technical_explanation']}")
-                                        elif _br.get("devs_found", 0) == 0:
-                                            st.warning("🐛 Bug found but no developer assigned to this card in Trello.")
-                                        else:
-                                            st.warning(f"🐛 Bug found — DM failed: {_br.get('error', '')}")
-
-                            # ── QA interaction panel ──────────────────────
-                            if sav_report.qa_needed:
-                                st.divider()
-                                st.warning(
-                                    f"🙋 Claude needs your help with "
-                                    f"**{len(sav_report.qa_needed)} scenario(s)**. "
-                                    "Answer below and click **Continue**."
-                                )
-                                for _qi, sv in enumerate(sav_report.qa_needed):
-                                    st.markdown(f"**Scenario:** {sv.scenario}")
-                                    st.markdown(f"🤖 *Claude says:* {sv.qa_question}")
-                                    _ans = st.text_input(
-                                        "Your answer",
-                                        key=f"sav_qa_input_{card.id}_{_qi}",
-                                        placeholder="e.g. It's under Additional Services → Freight tab",
-                                    )
-                                    if _ans.strip():
-                                        sav_qa[sv.scenario] = _ans.strip()
-
-                                if st.button(
-                                    "▶ Continue Verification",
-                                    key=f"sav_continue_{card.id}",
-                                    type="primary",
-                                ):
-                                    st.session_state[_sav_qa_key] = sav_qa
-                                    # Clear report so it re-runs on next rerun
-                                    del st.session_state[_sav_key]
-                                    st.rerun()
-
-                            # ── Feed into automation writer ───────────────
-                            if not sav_report.qa_needed:
-                                st.session_state[f"sav_context_{card.id}"] = \
-                                    sav_report.to_automation_context()
-
-                        st.divider()
-
-                        # ── STEP 2d: Generate Documents ───────────────────
-                        _step_header("2d", "Generate Documents")
-                        st.caption(
-                            "Generate a polished PDF from this card's Trello data. "
-                            "Claude reads the description and AC to build the document content automatically."
-                        )
-
-                        _doc_col1, _doc_col2 = st.columns(2)
-
-                        # ── Business Pitch ────────────────────────────────
-                        with _doc_col1:
-                            _biz_key = f"biz_pitch_{card.id}"
-                            _biz_path = st.session_state.get(_biz_key)
-
-                            if _biz_path and Path(_biz_path).exists():
-                                st.success("✅ Business Pitch ready")
-                                with open(_biz_path, "rb") as _bf:
-                                    st.download_button(
-                                        "⬇️ Download Business Pitch PDF",
-                                        data=_bf.read(),
-                                        file_name=Path(_biz_path).name,
-                                        mime="application/pdf",
-                                        key=f"dl_biz_{card.id}",
-                                        use_container_width=True,
-                                    )
-                                st.caption(f"📁 `{_biz_path}`")
-                                if st.button("🔁 Regenerate", key=f"regen_biz_{card.id}",
-                                             use_container_width=True):
-                                    del st.session_state[_biz_key]
-                                    st.rerun()
-                            else:
-                                if st.button(
-                                    "📄 Generate Business Document",
-                                    key=f"gen_biz_{card.id}",
-                                    use_container_width=True,
-                                    help="Business pitch PDF — merchant scenarios, benefits, problem statement",
-                                ):
-                                    try:
-                                        from pipeline.generate_business_pitch import generate_business_pitch as _gen_biz
-                                        with st.spinner("✍️ Claude is writing the Business Pitch… (~15–20s)"):
-                                            _biz_out = _gen_biz(
-                                                card_name=card.name,
-                                                card_desc=card.desc or "",
-                                                card_id=card.id,
-                                                card_url=card.url or "",
-                                            )
-                                        st.session_state[_biz_key] = _biz_out
-                                        st.rerun()
-                                    except Exception as _ex:
-                                        st.error(f"❌ Business Pitch failed: {_ex}")
-
-                        # ── Detailed Report ───────────────────────────────
-                        with _doc_col2:
-                            _det_key = f"det_report_{card.id}"
-                            _det_path = st.session_state.get(_det_key)
-
-                            if _det_path and Path(_det_path).exists():
-                                _sav_note = " (with SAV results)" if st.session_state.get(f"sav_report_{card.id}") else ""
-                                st.success(f"✅ Detailed Report ready{_sav_note}")
-                                with open(_det_path, "rb") as _df:
-                                    st.download_button(
-                                        "⬇️ Download Detailed Report PDF",
-                                        data=_df.read(),
-                                        file_name=Path(_det_path).name,
-                                        mime="application/pdf",
-                                        key=f"dl_det_{card.id}",
-                                        use_container_width=True,
-                                    )
-                                st.caption(f"📁 `{_det_path}`")
-                                if st.button("🔁 Regenerate", key=f"regen_det_{card.id}",
-                                             use_container_width=True):
-                                    del st.session_state[_det_key]
-                                    st.rerun()
-                            else:
-                                if st.button(
-                                    "📊 Generate Detailed Report",
-                                    key=f"gen_det_{card.id}",
-                                    use_container_width=True,
-                                    help="Full QA report — training guide, all test cases, AC sign-off, QA notes",
-                                ):
-                                    try:
-                                        from pipeline.generate_detailed_report import generate_detailed_report as _gen_det
-                                        with st.spinner("✍️ Claude is writing the Detailed Report… (~20–25s)"):
-                                            _det_out = _gen_det(
-                                                card_name=card.name,
-                                                card_desc=card.desc or "",
-                                                card_id=card.id,
-                                                card_url=card.url or "",
-                                                sav_report=st.session_state.get(f"sav_report_{card.id}"),
-                                            )
-                                        st.session_state[_det_key] = _det_out
-                                        st.rerun()
-                                    except Exception as _ex:
-                                        st.error(f"❌ Detailed Report failed: {_ex}")
-
-                        st.divider()
-
-                        # ── Ask Domain Expert ─────────────────────────────
-                        _step_header("2c", "Ask Domain Expert")
-                        st.caption(
-                            "Got a doubt while testing? Ask the Domain Expert — "
-                            "it uses AU Post docs + backend + frontend knowledge to answer. "
-                            "If it spots a code bug, it DMs the developer directly."
-                        )
-
-                        _dex_hist_key = f"dex_history_{card.id}"
-                        # Load from disk on first access this session
-                        if _dex_hist_key not in st.session_state:
-                            from pipeline.dex_history import load_history as _load_dex
-                            st.session_state[_dex_hist_key] = _load_dex(card.id)
-
-                        _dex_history = st.session_state[_dex_hist_key]
-
-                        # Show conversation history
-                        for _entry in _dex_history:
-                            st.markdown(f"**🙋 You:** {_entry['q']}")
-                            _ans_type = "error" if _entry.get("bug_possible") else "info"
-                            getattr(st, _ans_type)(f"🤖 **Domain Expert:** {_entry['a']}")
-                            if _entry.get("web_searched"):
-                                st.caption("   🌐 Answer enriched with web research")
-                            # Show bug DM result if any
-                            _br = _entry.get("bug_report", {})
-                            if _br and _br.get("ok"):
-                                _sent = ", ".join(_br.get("sent_to", []))
-                                st.success(f"🐛 Bug DM sent to: **{_sent}**")
-                                _loc = _br.get("location", {})
-                                if _loc.get("file_hint"):
-                                    st.caption(f"   📁 `{_loc['file_hint']}`")
-                            st.markdown("---")
-
-                        # Question input
-                        _dex_col1, _dex_col2 = st.columns([5, 1])
-                        with _dex_col1:
-                            _dex_q = st.text_input(
-                                "Your question",
-                                placeholder="e.g. Is this eParcel Extra Cover behavior correct? / Why is the API returning 422?",
-                                key=f"dex_q_{card.id}",
-                                label_visibility="collapsed",
-                            )
-                        with _dex_col2:
-                            _dex_ask = st.button(
-                                "Ask 🤖",
-                                key=f"dex_ask_{card.id}",
+                        col_proc1, col_proc2, col_proc3 = st.columns(3)
+                        with col_proc1:
+                            if st.button(
+                                "➡️ Proceed to Automation",
+                                key=f"proceed_{card.id}",
                                 use_container_width=True,
                                 type="primary",
-                            )
+                                help="Skip AC + TC generation — use existing and go straight to writing automation",
+                            ):
+                                # Pre-fill TC session state from existing Trello comment
+                                tc_store[card.id] = existing_tc_comment
+                                approved_store[card.id] = True
+                                st.session_state[f"ac_saved_{card.id}"] = True
+                                st.rerun()
+                        with col_proc2:
+                            if st.button(
+                                "📋 View existing TCs",
+                                key=f"view_tc_{card.id}",
+                                use_container_width=True,
+                            ):
+                                st.session_state[f"show_existing_tc_{card.id}"] = True
+                        with col_proc3:
+                            if st.button(
+                                "🔄 Regenerate",
+                                key=f"banner_regen_{card.id}",
+                                use_container_width=True,
+                                help="Start fresh — will add new rows to Trello + Sheet",
+                            ):
+                                st.session_state[f"force_regen_{card.id}"] = True
 
-                        if _dex_ask and _dex_q.strip():
-                            from pipeline.bug_reporter import ask_domain_expert, notify_devs_of_bug
-                            with st.spinner("🤖 Domain Expert is thinking…"):
-                                _dex_result = ask_domain_expert(
-                                    question=_dex_q.strip(),
-                                    card_name=card.name,
-                                    card_desc=card.desc or "",
-                                    history=_dex_history,
-                                )
-
-                            _entry = {
-                                "q": _dex_q.strip(),
-                                "a": _dex_result["answer"],
-                                "bug_possible": _dex_result["bug_possible"],
-                                "web_searched": _dex_result["web_searched"],
-                                "bug_report": {},
-                            }
-
-                            # Auto-notify dev if bug detected
-                            if _dex_result["bug_possible"]:
-                                with st.spinner("🐛 Bug suspected — analysing code + notifying developer…"):
-                                    _bug_res = notify_devs_of_bug(
-                                        card_id=card.id,
-                                        card_name=card.name,
-                                        card_url=card.url,
-                                        bug_description=_dex_q.strip() + "\n\n" + _dex_result["answer"],
-                                        scenario="Manual QA question",
-                                        qa_name="QA Team",
-                                    )
-                                _entry["bug_report"] = _bug_res
-
-                            _dex_history.append(_entry)
-                            st.session_state[_dex_hist_key] = _dex_history
-                            from pipeline.dex_history import save_history as _save_dex
-                            _save_dex(card.id, _dex_history)
-                            st.rerun()
-
-                        # Manual bug report button (QA decides it's a bug)
-                        if _dex_history:
-                            _last = _dex_history[-1]
-                            if not _last.get("bug_report") or not _last["bug_report"].get("ok"):
-                                if st.button(
-                                    "🐛 This is a Bug — Notify Developer",
-                                    key=f"dex_bug_{card.id}",
-                                    help="Send a DM to the developer assigned to this card",
-                                ):
-                                    from pipeline.bug_reporter import notify_devs_of_bug
-                                    with st.spinner("Sending bug DM to developer…"):
-                                        _bug_res = notify_devs_of_bug(
-                                            card_id=card.id,
-                                            card_name=card.name,
-                                            card_url=card.url,
-                                            bug_description=_last["q"] + "\n\n" + _last["a"],
-                                            scenario="Manual QA report",
-                                            qa_name="QA Team",
-                                        )
-                                    _dex_history[-1]["bug_report"] = _bug_res
-                                    st.session_state[_dex_hist_key] = _dex_history
+                        if st.session_state.get(f"show_existing_tc_{card.id}"):
+                            with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
+                                st.markdown(existing_tc_comment)
+                                if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                                    del st.session_state[f"show_existing_tc_{card.id}"]
                                     st.rerun()
 
-                        if _dex_history and st.button("🗑 Clear conversation", key=f"dex_clear_{card.id}"):
-                            from pipeline.dex_history import clear_history as _clear_dex
-                            _clear_dex(card.id)
-                            st.session_state[_dex_hist_key] = []
+                    # For already-processed cards: skip AC/TC steps, show only SAV
+                    _processed_only = (already_done and not is_approved
+                            and not st.session_state.get(f"force_regen_{card.id}", False))
+
+                    if _processed_only:
+                        pass  # Approved cards show step 5 in else block
+
+                    # ── STEP 3: Generate Test Cases ───────────────────
+                    _step_header("3", "Generate Test Cases")
+                    if vr and vr.overall_status == "FAIL":
+                        st.warning("⚠️ Accuracy issues found above — consider fixing the card before generating. "
+                                   "You can still generate if you want to proceed.")
+
+                    if card.id not in tc_store:
+                        if st.button("🤖 Generate Test Cases", key=f"gen_{card.id}",
+                                     type="primary" if (not vr or vr.overall_status == "PASS") else "secondary"):
+                            with st.spinner("Claude is writing test cases…"):
+                                tc_store[card.id] = generate_test_cases(card)
                             st.rerun()
+                    else:
+                        # Show generated test cases
+                        tc = tc_store[card.id]
+                        st.markdown(tc)
 
-                        st.divider()
+                        # ── Send TC via Slack (DM or Channel) ────────
+                        _tc_dm_open_key = f"show_dm_tc_{card.id}"
+                        _tc_dm_sent_key = f"tc_dm_sent_{card.id}"
+                        _tc_ch_open_key = f"show_ch_tc_{card.id}"
+                        _tc_ch_sent_key = f"tc_ch_sent_{card.id}"
 
-                        if _processed_only:
-                            continue  # skip Steps 3-5 for already-processed cards
-
-                        # ── STEP 3: Generate Test Cases ───────────────────
-                        _step_header("3", "Generate Test Cases")
-                        if vr and vr.overall_status == "FAIL":
-                            st.warning("⚠️ Accuracy issues found above — consider fixing the card before generating. "
-                                       "You can still generate if you want to proceed.")
-
-                        if card.id not in tc_store:
-                            if st.button("🤖 Generate Test Cases", key=f"gen_{card.id}",
-                                         type="primary" if (not vr or vr.overall_status == "PASS") else "secondary"):
-                                with st.spinner("Claude is writing test cases…"):
-                                    tc_store[card.id] = generate_test_cases(card)
+                        if st.session_state.get(_tc_dm_sent_key):
+                            st.success("✅ Test cases sent via Slack DM!")
+                            if st.button("📨 Send again", key=f"tc_dm_resend_{card.id}"):
+                                st.session_state[_tc_dm_sent_key] = False
+                                st.session_state[_tc_dm_open_key] = True
+                                st.rerun()
+                        elif st.session_state.get(_tc_ch_sent_key):
+                            st.success("✅ Test cases posted to Slack channel!")
+                            if st.button("📢 Post again", key=f"tc_ch_resend_{card.id}"):
+                                st.session_state[_tc_ch_sent_key] = False
+                                st.session_state[_tc_ch_open_key] = True
                                 st.rerun()
                         else:
-                            # Show generated test cases
-                            tc = tc_store[card.id]
-                            st.markdown(tc)
-
-                            # ── Send TC via Slack (DM or Channel) ────────
-                            _tc_dm_open_key = f"show_dm_tc_{card.id}"
-                            _tc_dm_sent_key = f"tc_dm_sent_{card.id}"
-                            _tc_ch_open_key = f"show_ch_tc_{card.id}"
-                            _tc_ch_sent_key = f"tc_ch_sent_{card.id}"
-
-                            if st.session_state.get(_tc_dm_sent_key):
-                                st.success("✅ Test cases sent via Slack DM!")
-                                if st.button("📨 Send again", key=f"tc_dm_resend_{card.id}"):
-                                    st.session_state[_tc_dm_sent_key] = False
+                            _tc_btn_col1, _tc_btn_col2 = st.columns(2)
+                            with _tc_btn_col1:
+                                if st.button(
+                                    "📨 Send Test Cases via Slack DM",
+                                    key=f"open_dm_tc_{card.id}",
+                                    use_container_width=True,
+                                ):
                                     st.session_state[_tc_dm_open_key] = True
-                                    st.rerun()
-                            elif st.session_state.get(_tc_ch_sent_key):
-                                st.success("✅ Test cases posted to Slack channel!")
-                                if st.button("📢 Post again", key=f"tc_ch_resend_{card.id}"):
-                                    st.session_state[_tc_ch_sent_key] = False
+                                    st.session_state[_tc_ch_open_key] = False
+                            with _tc_btn_col2:
+                                if st.button(
+                                    "📢 Send to Slack Channel",
+                                    key=f"open_ch_tc_{card.id}",
+                                    use_container_width=True,
+                                ):
                                     st.session_state[_tc_ch_open_key] = True
-                                    st.rerun()
-                            else:
-                                _tc_btn_col1, _tc_btn_col2 = st.columns(2)
-                                with _tc_btn_col1:
-                                    if st.button(
-                                        "📨 Send Test Cases via Slack DM",
-                                        key=f"open_dm_tc_{card.id}",
-                                        use_container_width=True,
-                                    ):
-                                        st.session_state[_tc_dm_open_key] = True
-                                        st.session_state[_tc_ch_open_key] = False
-                                with _tc_btn_col2:
-                                    if st.button(
-                                        "📢 Send to Slack Channel",
-                                        key=f"open_ch_tc_{card.id}",
-                                        use_container_width=True,
-                                    ):
-                                        st.session_state[_tc_ch_open_key] = True
-                                        st.session_state[_tc_dm_open_key] = False
+                                    st.session_state[_tc_dm_open_key] = False
 
-                            # ── Slack Channel panel (TC) ──────────────────
-                            if st.session_state.get(_tc_ch_open_key):
-                                from pipeline.slack_client import (
-                                    dm_token_configured, list_slack_channels,
-                                    post_content_to_slack_channel,
+                        # ── Slack Channel panel (TC) ──────────────────
+                        if st.session_state.get(_tc_ch_open_key):
+                            from pipeline.slack_client import (
+                                dm_token_configured, list_slack_channels,
+                                post_content_to_slack_channel,
+                            )
+                            if not dm_token_configured():
+                                st.warning(
+                                    "⚠️ SLACK_BOT_TOKEN is not set — channel posting requires a bot token.\n\n"
+                                    "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
                                 )
-                                if not dm_token_configured():
-                                    st.warning(
-                                        "⚠️ SLACK_BOT_TOKEN is not set — channel posting requires a bot token.\n\n"
-                                        "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
-                                    )
+                            else:
+                                st.markdown("##### 📢 Post Test Cases to Slack Channel")
+                                _ch_cache_key = "slack_channels_cache"
+                                if _ch_cache_key not in st.session_state:
+                                    with st.spinner("Loading channels…"):
+                                        _chs, _ch_err, _ch_note = list_slack_channels()
+                                    if _ch_err:
+                                        st.error(f"❌ {_ch_err}")
+                                        _chs = []
+                                    st.session_state[_ch_cache_key] = (_chs, _ch_note)
                                 else:
-                                    st.markdown("##### 📢 Post Test Cases to Slack Channel")
-                                    _ch_cache_key = "slack_channels_cache"
-                                    if _ch_cache_key not in st.session_state:
-                                        with st.spinner("Loading channels…"):
-                                            _chs, _ch_err, _ch_note = list_slack_channels()
-                                        if _ch_err:
-                                            st.error(f"❌ {_ch_err}")
-                                            _chs = []
-                                        st.session_state[_ch_cache_key] = (_chs, _ch_note)
-                                    else:
-                                        _chs, _ch_note = st.session_state[_ch_cache_key]
+                                    _chs, _ch_note = st.session_state[_ch_cache_key]
 
-                                    if _ch_note:
-                                        st.caption(f"ℹ️ {_ch_note}")
+                                if _ch_note:
+                                    st.caption(f"ℹ️ {_ch_note}")
 
-                                    if _chs:
-                                        _ch_options = {
-                                            f"{'🔒' if c['is_private'] else '#'} {c['name']}": c["id"]
-                                            for c in _chs
-                                        }
-                                        _tc_ch_sel_col, _tc_ch_ref_col = st.columns([3, 1])
-                                        with _tc_ch_sel_col:
-                                            _tc_ch_sel = st.selectbox(
-                                                "Select channel",
-                                                options=list(_ch_options.keys()),
-                                                key=f"tc_ch_select_{card.id}",
+                                if _chs:
+                                    _ch_options = {
+                                        f"{'🔒' if c['is_private'] else '#'} {c['name']}": c["id"]
+                                        for c in _chs
+                                    }
+                                    _tc_ch_sel_col, _tc_ch_ref_col = st.columns([3, 1])
+                                    with _tc_ch_sel_col:
+                                        _tc_ch_sel = st.selectbox(
+                                            "Select channel",
+                                            options=list(_ch_options.keys()),
+                                            key=f"tc_ch_select_{card.id}",
+                                        )
+                                    with _tc_ch_ref_col:
+                                        st.markdown("<br>", unsafe_allow_html=True)
+                                        if st.button("🔄 Refresh", key=f"tc_ch_refresh_{card.id}",
+                                                     use_container_width=True):
+                                            del st.session_state[_ch_cache_key]
+                                            st.rerun()
+
+                                    if st.button(
+                                        f"📢 Post to {_tc_ch_sel}",
+                                        key=f"tc_ch_send_btn_{card.id}",
+                                        type="primary",
+                                        use_container_width=True,
+                                    ):
+                                        _tc_sel_ch_id = _ch_options[_tc_ch_sel]
+                                        with st.spinner("Posting to channel…"):
+                                            _tc_ch_result = post_content_to_slack_channel(
+                                                channel_id=_tc_sel_ch_id,
+                                                card_name=card.name,
+                                                content_text=tc,
+                                                content_label="Test Cases",
+                                                card_url=getattr(card, "url", ""),
                                             )
-                                        with _tc_ch_ref_col:
-                                            st.markdown("<br>", unsafe_allow_html=True)
-                                            if st.button("🔄 Refresh", key=f"tc_ch_refresh_{card.id}",
-                                                         use_container_width=True):
-                                                del st.session_state[_ch_cache_key]
-                                                st.rerun()
+                                        if _tc_ch_result["ok"]:
+                                            st.session_state[_tc_ch_sent_key] = True
+                                            st.session_state[_tc_ch_open_key] = False
+                                            st.rerun()
+                                        else:
+                                            st.error(f"❌ {_tc_ch_result['error']}")
 
+                        # ── Slack DM panel (TC) ───────────────────────
+                        if st.session_state.get(_tc_dm_open_key):
+                            from pipeline.slack_client import (
+                                dm_token_configured, search_slack_users, send_ac_dm,
+                            )
+                            if not dm_token_configured():
+                                st.warning(
+                                    "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
+                                    "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                                )
+                            else:
+                                st.markdown("##### 📨 Send Test Cases via DM")
+                                _tc_dm_col1, _tc_dm_col2 = st.columns([3, 1])
+                                with _tc_dm_col1:
+                                    _tc_dm_query = st.text_input(
+                                        "Search member",
+                                        placeholder="Search by name — add multiple one by one",
+                                        key=f"tc_dm_search_query_{card.id}",
+                                    )
+                                with _tc_dm_col2:
+                                    st.markdown("<br>", unsafe_allow_html=True)
+                                    _tc_do_search = st.button(
+                                        "🔍 Search",
+                                        key=f"tc_dm_search_btn_{card.id}",
+                                        use_container_width=True,
+                                    )
+
+                                _tc_pool_key = f"tc_dm_user_pool_{card.id}"
+                                if _tc_pool_key not in st.session_state:
+                                    st.session_state[_tc_pool_key] = {}
+
+                                if _tc_do_search and _tc_dm_query.strip():
+                                    with st.spinner("Searching…"):
+                                        _tc_raw = search_slack_users(_tc_dm_query.strip())
+                                    _tc_found, _tc_search_err = (
+                                        _tc_raw if isinstance(_tc_raw, tuple)
+                                        else (_tc_raw or [], "")
+                                    )
+                                    if _tc_search_err:
+                                        st.error(f"❌ {_tc_search_err}")
+                                    elif not _tc_found:
+                                        st.info("No users found — try a different name.")
+                                    else:
+                                        for u in _tc_found:
+                                            _lbl = f"{u['name']} (@{u['display_name']})"
+                                            st.session_state[_tc_pool_key][_lbl] = u["id"]
+                                        st.success(f"Found {len(_tc_found)} user(s) — select below.")
+
+                                _tc_pool = st.session_state[_tc_pool_key]
+                                if _tc_pool:
+                                    _tc_selected_labels = st.multiselect(
+                                        "Select recipients (pick multiple)",
+                                        options=list(_tc_pool.keys()),
+                                        key=f"tc_dm_user_multi_{card.id}",
+                                    )
+                                    if st.button("✖ Clear search results",
+                                                 key=f"tc_dm_clear_{card.id}"):
+                                        st.session_state[_tc_pool_key] = {}
+                                        st.rerun()
+
+                                    if st.session_state.get(_tc_dm_sent_key):
+                                        st.success("✅ Test cases sent via Slack DM!")
+                                        if st.button("📨 Send again",
+                                                     key=f"tc_dm_resend_inner_{card.id}"):
+                                            st.session_state[_tc_dm_sent_key] = False
+                                            st.rerun()
+                                    elif _tc_selected_labels:
+                                        _tc_selected_uids = [_tc_pool[l] for l in _tc_selected_labels]
+                                        _tc_n = len(_tc_selected_uids)
                                         if st.button(
-                                            f"📢 Post to {_tc_ch_sel}",
-                                            key=f"tc_ch_send_btn_{card.id}",
+                                            f"📨 Send to {_tc_n} person{'s' if _tc_n > 1 else ''}",
+                                            key=f"tc_dm_send_btn_{card.id}",
                                             type="primary",
                                             use_container_width=True,
                                         ):
-                                            _tc_sel_ch_id = _ch_options[_tc_ch_sel]
-                                            with st.spinner("Posting to channel…"):
-                                                _tc_ch_result = post_content_to_slack_channel(
-                                                    channel_id=_tc_sel_ch_id,
+                                            with st.spinner(f"Sending DM to {_tc_n} recipient(s)…"):
+                                                _tc_dm_result = send_ac_dm(
+                                                    user_ids=_tc_selected_uids,
                                                     card_name=card.name,
-                                                    content_text=tc,
+                                                    ac_text=tc,
                                                     content_label="Test Cases",
-                                                    card_url=getattr(card, "url", ""),
                                                 )
-                                            if _tc_ch_result["ok"]:
-                                                st.session_state[_tc_ch_sent_key] = True
-                                                st.session_state[_tc_ch_open_key] = False
+                                            if _tc_dm_result["ok"]:
+                                                st.session_state[_tc_dm_sent_key] = True
+                                                st.session_state[_tc_dm_open_key] = False
                                                 st.rerun()
                                             else:
-                                                st.error(f"❌ {_tc_ch_result['error']}")
-
-                            # ── Slack DM panel (TC) ───────────────────────
-                            if st.session_state.get(_tc_dm_open_key):
-                                from pipeline.slack_client import (
-                                    dm_token_configured, search_slack_users, send_ac_dm,
-                                )
-                                if not dm_token_configured():
-                                    st.warning(
-                                        "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
-                                        "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
-                                    )
-                                else:
-                                    st.markdown("##### 📨 Send Test Cases via DM")
-                                    _tc_dm_col1, _tc_dm_col2 = st.columns([3, 1])
-                                    with _tc_dm_col1:
-                                        _tc_dm_query = st.text_input(
-                                            "Search member",
-                                            placeholder="Search by name — add multiple one by one",
-                                            key=f"tc_dm_search_query_{card.id}",
-                                        )
-                                    with _tc_dm_col2:
-                                        st.markdown("<br>", unsafe_allow_html=True)
-                                        _tc_do_search = st.button(
-                                            "🔍 Search",
-                                            key=f"tc_dm_search_btn_{card.id}",
-                                            use_container_width=True,
-                                        )
-
-                                    _tc_pool_key = f"tc_dm_user_pool_{card.id}"
-                                    if _tc_pool_key not in st.session_state:
-                                        st.session_state[_tc_pool_key] = {}
-
-                                    if _tc_do_search and _tc_dm_query.strip():
-                                        with st.spinner("Searching…"):
-                                            _tc_raw = search_slack_users(_tc_dm_query.strip())
-                                        _tc_found, _tc_search_err = (
-                                            _tc_raw if isinstance(_tc_raw, tuple)
-                                            else (_tc_raw or [], "")
-                                        )
-                                        if _tc_search_err:
-                                            st.error(f"❌ {_tc_search_err}")
-                                        elif not _tc_found:
-                                            st.info("No users found — try a different name.")
-                                        else:
-                                            for u in _tc_found:
-                                                _lbl = f"{u['name']} (@{u['display_name']})"
-                                                st.session_state[_tc_pool_key][_lbl] = u["id"]
-                                            st.success(f"Found {len(_tc_found)} user(s) — select below.")
-
-                                    _tc_pool = st.session_state[_tc_pool_key]
-                                    if _tc_pool:
-                                        _tc_selected_labels = st.multiselect(
-                                            "Select recipients (pick multiple)",
-                                            options=list(_tc_pool.keys()),
-                                            key=f"tc_dm_user_multi_{card.id}",
-                                        )
-                                        if st.button("✖ Clear search results",
-                                                     key=f"tc_dm_clear_{card.id}"):
-                                            st.session_state[_tc_pool_key] = {}
-                                            st.rerun()
-
-                                        if st.session_state.get(_tc_dm_sent_key):
-                                            st.success("✅ Test cases sent via Slack DM!")
-                                            if st.button("📨 Send again",
-                                                         key=f"tc_dm_resend_inner_{card.id}"):
-                                                st.session_state[_tc_dm_sent_key] = False
-                                                st.rerun()
-                                        elif _tc_selected_labels:
-                                            _tc_selected_uids = [_tc_pool[l] for l in _tc_selected_labels]
-                                            _tc_n = len(_tc_selected_uids)
-                                            if st.button(
-                                                f"📨 Send to {_tc_n} person{'s' if _tc_n > 1 else ''}",
-                                                key=f"tc_dm_send_btn_{card.id}",
-                                                type="primary",
-                                                use_container_width=True,
-                                            ):
-                                                with st.spinner(f"Sending DM to {_tc_n} recipient(s)…"):
-                                                    _tc_dm_result = send_ac_dm(
-                                                        user_ids=_tc_selected_uids,
-                                                        card_name=card.name,
-                                                        ac_text=tc,
-                                                        content_label="Test Cases",
-                                                    )
-                                                if _tc_dm_result["ok"]:
-                                                    st.session_state[_tc_dm_sent_key] = True
-                                                    st.session_state[_tc_dm_open_key] = False
-                                                    st.rerun()
+                                                _ts, _tf = _tc_dm_result.get("sent", 0), _tc_dm_result.get("failed", 0)
+                                                if _ts:
+                                                    st.warning(f"⚠️ Sent to {_ts}, failed for {_tf}: {_tc_dm_result['error']}")
                                                 else:
-                                                    _ts, _tf = _tc_dm_result.get("sent", 0), _tc_dm_result.get("failed", 0)
-                                                    if _ts:
-                                                        st.warning(f"⚠️ Sent to {_ts}, failed for {_tf}: {_tc_dm_result['error']}")
-                                                    else:
-                                                        st.error(f"❌ DM failed: {_tc_dm_result['error']}")
-                                        else:
-                                            st.caption("Select at least one recipient above.")
-
-                            if not is_approved:
-                                st.divider()
-                                _step_header("4", "Review & Approve")
-
-                                # TC type breakdown summary
-                                if sheets_ready:
-                                    _all_rows  = parse_test_cases_to_rows(card.name, tc)
-                                    _pos_rows  = [r for r in _all_rows if r.tc_type == "Positive"]
-                                    _neg_rows  = [r for r in _all_rows if r.tc_type == "Negative"]
-                                    _edge_rows = [r for r in _all_rows if r.tc_type == "Edge"]
-                                    st.caption(
-                                        f"📊 **{len(_all_rows)} total TCs** · "
-                                        f"✅ {len(_pos_rows)} positive → Sheet · "
-                                        f"❌ {len(_neg_rows)} negative → Trello comment only · "
-                                        f"⚠️ {len(_edge_rows)} edge → Trello comment only"
-                                    )
-
-                                # Sheet tab selector
-                                if sheets_ready:
-                                    suggested_tab = detect_tab(card.name, tc)
-
-                                    # Allow QA to create a new tab if needed
-                                    _new_tab_key = f"new_tab_name_{card.id}"
-                                    _tab_created_key = f"tab_created_{card.id}"
-
-                                    _tc_col1, _tc_col2 = st.columns([3, 2])
-                                    with _tc_col1:
-                                        tab_options = list(SHEET_TABS)
-                                        # Add any newly created tab to options immediately
-                                        _newly_created = st.session_state.get(_tab_created_key, "")
-                                        if _newly_created and _newly_created not in tab_options:
-                                            tab_options.insert(0, _newly_created)
-
-                                        _default_tab = _newly_created if _newly_created else suggested_tab
-                                        tab_idx = tab_options.index(_default_tab) if _default_tab in tab_options else 0
-                                        chosen_tab = st.selectbox(
-                                            "📊 Add to sheet tab",
-                                            tab_options,
-                                            index=tab_idx,
-                                            key=f"tab_{card.id}",
-                                        )
-                                    with _tc_col2:
-                                        _new_tab_name = st.text_input(
-                                            "➕ Or create new tab",
-                                            placeholder="New tab name…",
-                                            key=_new_tab_key,
-                                            label_visibility="collapsed",
-                                        )
-                                        if st.button("➕ Create Tab", key=f"create_tab_{card.id}",
-                                                     use_container_width=True):
-                                            if _new_tab_name.strip():
-                                                from pipeline.sheets_writer import create_new_tab
-                                                with st.spinner(f"Creating tab '{_new_tab_name.strip()}'…"):
-                                                    _ct_res = create_new_tab(_new_tab_name.strip())
-                                                if _ct_res["ok"]:
-                                                    _action = "already exists" if _ct_res.get("existed") else "created"
-                                                    st.success(f"✅ Tab '{_ct_res['tab']}' {_action}! [Open]({_ct_res['sheet_url']})")
-                                                    st.session_state[_tab_created_key] = _ct_res["tab"]
-                                                    # Add to SHEET_TABS in memory so selectbox shows it
-                                                    if _ct_res["tab"] not in SHEET_TABS:
-                                                        SHEET_TABS.append(_ct_res["tab"])
-                                                    st.rerun()
-                                                else:
-                                                    st.error(f"❌ Failed: {_ct_res['error']}")
-                                            else:
-                                                st.warning("Enter a tab name first")
-
-                                # ── Duplicate check (runs when sheet is ready + tab chosen)
-                                if sheets_ready:
-                                    dup_key = f"dups_{card.id}_{chosen_tab}"
-                                    if dup_key not in st.session_state:
-                                        try:
-                                            new_rows = parse_test_cases_to_rows(card.name, tc)
-                                            st.session_state[dup_key] = check_duplicates(new_rows, chosen_tab)
-                                        except Exception:
-                                            st.session_state[dup_key] = []
-
-                                    dups = st.session_state.get(dup_key, [])
-                                    if dups:
-                                        with st.expander(f"⚠️ {len(dups)} possible duplicate(s) found in sheet — click to review", expanded=True):
-                                            for d in dups:
-                                                badge = "🔴 Exact match" if d.is_exact else f"🟡 {int(d.score * 100)}% similar"
-                                                st.markdown(
-                                                    f"{badge} · Row {d.sheet_row} in **{d.sheet_tab}**\n\n"
-                                                    f"- **Existing:** {d.sheet_scenario}\n"
-                                                    f"- **New:** {d.new_scenario}"
-                                                )
-                                            st.caption("You can still approve — duplicates won't be blocked. "
-                                                       "Use 'Skip duplicates' to only write non-duplicate TCs.")
-                                        force_write = st.checkbox(
-                                            "Skip duplicate TCs (only add new ones)",
-                                            key=f"skip_dups_{card.id}",
-                                        )
+                                                    st.error(f"❌ DM failed: {_tc_dm_result['error']}")
                                     else:
-                                        force_write = False
-                                        st.caption("✅ No duplicates found in sheet")
-                                else:
-                                    dups = []
-                                    force_write = False
+                                        st.caption("Select at least one recipient above.")
 
-                                col_approve, col_edit = st.columns([1, 2])
+                        if not is_approved:
+                            st.divider()
+                            _step_header("4", "Review & Approve")
 
-                                with col_approve:
-                                    if st.button("✅ Approve & Save", key=f"approve_{card.id}",
-                                                 use_container_width=True, type="primary"):
-                                        trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
+                            # TC type breakdown summary
+                            if sheets_ready:
+                                _all_rows  = parse_test_cases_to_rows(card.name, tc)
+                                _pos_rows  = [r for r in _all_rows if r.tc_type == "Positive"]
+                                _neg_rows  = [r for r in _all_rows if r.tc_type == "Negative"]
+                                _edge_rows = [r for r in _all_rows if r.tc_type == "Edge"]
+                                st.caption(
+                                    f"📊 **{len(_all_rows)} total TCs** · "
+                                    f"✅ {len(_pos_rows)} positive → Sheet · "
+                                    f"❌ {len(_neg_rows)} negative → Trello comment only · "
+                                    f"⚠️ {len(_edge_rows)} edge → Trello comment only"
+                                )
 
-                                        # 1. Write to Trello card
-                                        with st.spinner("Saving to Trello…"):
-                                            write_test_cases_to_card(
-                                                card.id, tc, trello,
-                                                release=current_release,
-                                                card_name=card.name,
-                                            )
+                            # Sheet tab selector
+                            if sheets_ready:
+                                suggested_tab = detect_tab(card.name, tc)
 
-                                        # 2. Write to Google Sheets
-                                        if sheets_ready:
-                                            with st.spinner(f"Adding to '{chosen_tab}' sheet…"):
-                                                try:
-                                                    tc_to_write = tc
-                                                    skipped = 0
-                                                    if force_write and dups:
-                                                        dup_scenarios = {d.new_scenario.lower().strip() for d in dups}
-                                                        tc_lines = tc.split("\n")
-                                                        filtered_blocks = []
-                                                        current_block = []
-                                                        skip_block = False
-                                                        for line in tc_lines:
-                                                            if line.strip().startswith("### TC-"):
-                                                                if current_block and not skip_block:
-                                                                    filtered_blocks.extend(current_block)
-                                                                elif skip_block:
-                                                                    skipped += 1
-                                                                current_block = [line]
-                                                                title = line.split(":", 1)[-1].strip().lower()
-                                                                skip_block = any(title in s or s in title for s in dup_scenarios)
-                                                            else:
-                                                                current_block.append(line)
-                                                        if current_block and not skip_block:
-                                                            filtered_blocks.extend(current_block)
-                                                        elif skip_block:
-                                                            skipped += 1
-                                                        tc_to_write = "\n".join(filtered_blocks)
+                                # Allow QA to create a new tab if needed
+                                _new_tab_key = f"new_tab_name_{card.id}"
+                                _tab_created_key = f"tab_created_{card.id}"
 
-                                                    result = append_to_sheet(
-                                                        card_name=card.name,
-                                                        test_cases_markdown=tc_to_write,
-                                                        tab_name=chosen_tab,
-                                                        release=current_release,
-                                                    )
-                                                    skip_msg = f" ({skipped} duplicates skipped)" if skipped else ""
-                                                    st.success(
-                                                        f"✅ Saved to Trello + "
-                                                        f"[{result['rows_added']} rows → '{result['tab']}' sheet{skip_msg}]"
-                                                        f"  [Open sheet]({result['sheet_url']})"
-                                                    )
-                                                except Exception as e:
-                                                    st.warning(f"Trello saved ✅ but Sheets failed: {e}")
+                                _tc_col1, _tc_col2 = st.columns([3, 2])
+                                with _tc_col1:
+                                    tab_options = list(SHEET_TABS)
+                                    # Add any newly created tab to options immediately
+                                    _newly_created = st.session_state.get(_tab_created_key, "")
+                                    if _newly_created and _newly_created not in tab_options:
+                                        tab_options.insert(0, _newly_created)
+
+                                    _default_tab = _newly_created if _newly_created else suggested_tab
+                                    tab_idx = tab_options.index(_default_tab) if _default_tab in tab_options else 0
+                                    chosen_tab = st.selectbox(
+                                        "📊 Add to sheet tab",
+                                        tab_options,
+                                        index=tab_idx,
+                                        key=f"tab_{card.id}",
+                                    )
+                                with _tc_col2:
+                                    _new_tab_name = st.text_input(
+                                        "➕ Or create new tab",
+                                        placeholder="New tab name…",
+                                        key=_new_tab_key,
+                                        label_visibility="collapsed",
+                                    )
+                                    if st.button("➕ Create Tab", key=f"create_tab_{card.id}",
+                                                 use_container_width=True):
+                                        if _new_tab_name.strip():
+                                            from pipeline.sheets_writer import create_new_tab
+                                            with st.spinner(f"Creating tab '{_new_tab_name.strip()}'…"):
+                                                _ct_res = create_new_tab(_new_tab_name.strip())
+                                            if _ct_res["ok"]:
+                                                _action = "already exists" if _ct_res.get("existed") else "created"
+                                                st.success(f"✅ Tab '{_ct_res['tab']}' {_action}! [Open]({_ct_res['sheet_url']})")
+                                                st.session_state[_tab_created_key] = _ct_res["tab"]
+                                                # Add to SHEET_TABS in memory so selectbox shows it
+                                                if _ct_res["tab"] not in SHEET_TABS:
+                                                    SHEET_TABS.append(_ct_res["tab"])
+                                                st.rerun()
+                                            else:
+                                                st.error(f"❌ Failed: {_ct_res['error']}")
                                         else:
-                                            st.success("✅ Saved to Trello card!")
+                                            st.warning("Enter a tab name first")
 
-                                        approved_store[card.id] = True
+                            # ── Duplicate check (runs when sheet is ready + tab chosen)
+                            if sheets_ready:
+                                dup_key = f"dups_{card.id}_{chosen_tab}"
+                                if dup_key not in st.session_state:
+                                    try:
+                                        new_rows = parse_test_cases_to_rows(card.name, tc)
+                                        st.session_state[dup_key] = check_duplicates(new_rows, chosen_tab)
+                                    except Exception:
+                                        st.session_state[dup_key] = []
 
-                                        # 3. Update RAG knowledge base
-                                        _ac_for_rag = (
-                                            st.session_state.get(f"ac_suggestion_{card.id}")
-                                            or card.desc or ""
+                                dups = st.session_state.get(dup_key, [])
+                                if dups:
+                                    with st.expander(f"⚠️ {len(dups)} possible duplicate(s) found in sheet — click to review", expanded=True):
+                                        for d in dups:
+                                            badge = "🔴 Exact match" if d.is_exact else f"🟡 {int(d.score * 100)}% similar"
+                                            st.markdown(
+                                                f"{badge} · Row {d.sheet_row} in **{d.sheet_tab}**\n\n"
+                                                f"- **Existing:** {d.sheet_scenario}\n"
+                                                f"- **New:** {d.new_scenario}"
+                                            )
+                                        st.caption("You can still approve — duplicates won't be blocked. "
+                                                   "Use 'Skip duplicates' to only write non-duplicate TCs.")
+                                    force_write = st.checkbox(
+                                        "Skip duplicate TCs (only add new ones)",
+                                        key=f"skip_dups_{card.id}",
+                                    )
+                                else:
+                                    force_write = False
+                                    st.caption("✅ No duplicates found in sheet")
+                            else:
+                                dups = []
+                                force_write = False
+
+                            col_approve, col_edit = st.columns([1, 2])
+
+                            with col_approve:
+                                if st.button("✅ Approve & Save", key=f"approve_{card.id}",
+                                             use_container_width=True, type="primary"):
+                                    trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
+
+                                    # 1. Write to Trello card
+                                    with st.spinner("Saving to Trello…"):
+                                        write_test_cases_to_card(
+                                            card.id, tc, trello,
+                                            release=current_release,
+                                            card_name=card.name,
                                         )
-                                        rag_result = {"chunks_added": 0, "error": ""}
-                                        try:
-                                            from pipeline.rag_updater import update_rag_from_card
-                                            with st.spinner("📚 Updating knowledge base…"):
-                                                rag_result = update_rag_from_card(
-                                                    card_id=card.id,
+
+                                    # 2. Write to Google Sheets
+                                    if sheets_ready:
+                                        with st.spinner(f"Adding to '{chosen_tab}' sheet…"):
+                                            try:
+                                                tc_to_write = tc
+                                                skipped = 0
+                                                if force_write and dups:
+                                                    dup_scenarios = {d.new_scenario.lower().strip() for d in dups}
+                                                    tc_lines = tc.split("\n")
+                                                    filtered_blocks = []
+                                                    current_block = []
+                                                    skip_block = False
+                                                    for line in tc_lines:
+                                                        if line.strip().startswith("### TC-"):
+                                                            if current_block and not skip_block:
+                                                                filtered_blocks.extend(current_block)
+                                                            elif skip_block:
+                                                                skipped += 1
+                                                            current_block = [line]
+                                                            title = line.split(":", 1)[-1].strip().lower()
+                                                            skip_block = any(title in s or s in title for s in dup_scenarios)
+                                                        else:
+                                                            current_block.append(line)
+                                                    if current_block and not skip_block:
+                                                        filtered_blocks.extend(current_block)
+                                                    elif skip_block:
+                                                        skipped += 1
+                                                    tc_to_write = "\n".join(filtered_blocks)
+
+                                                result = append_to_sheet(
                                                     card_name=card.name,
-                                                    description=card.desc or "",
-                                                    acceptance_criteria=_ac_for_rag,
-                                                    test_cases=tc,
+                                                    test_cases_markdown=tc_to_write,
+                                                    tab_name=chosen_tab,
                                                     release=current_release,
                                                 )
-                                            if rag_result["error"]:
-                                                st.warning(f"⚠️ RAG update failed: {rag_result['error']}")
-                                            else:
-                                                st.caption(
-                                                    f"📚 Knowledge base updated "
-                                                    f"({rag_result['chunks_added']} chunks added)"
+                                                skip_msg = f" ({skipped} duplicates skipped)" if skipped else ""
+                                                st.success(
+                                                    f"✅ Saved to Trello + "
+                                                    f"[{result['rows_added']} rows → '{result['tab']}' sheet{skip_msg}]"
+                                                    f"  [Open sheet]({result['sheet_url']})"
                                                 )
-                                        except Exception as _rag_exc:
-                                            st.warning(f"⚠️ RAG update skipped: {_rag_exc}")
-
-                                        # 4. Save to History
-                                        st.session_state.pipeline_runs[card.id] = {
-                                            "card_name":   card.name,
-                                            "card_url":    card.url or "",
-                                            "release":     current_release,
-                                            "test_cases":  tc[:500] + ("…" if len(tc) > 500 else ""),
-                                            "rag_chunks":  rag_result.get("chunks_added", 0),
-                                            "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                        }
-                                        _save_history(st.session_state.pipeline_runs)
-
-                                        st.rerun()
-
-                                with col_edit:
-                                    feedback = st.text_input(
-                                        "✏️ Request changes",
-                                        placeholder="e.g. Add a test case for Saturday delivery, change TC-2 priority to High",
-                                        key=f"feedback_{card.id}",
-                                    )
-                                    if st.button("🔄 Regenerate", key=f"regen_{card.id}",
-                                                 use_container_width=True):
-                                        if feedback.strip():
-                                            with st.spinner("Claude is updating test cases…"):
-                                                tc_store[card.id] = regenerate_with_feedback(
-                                                    card, tc, feedback
-                                                )
-                                            st.rerun()
-                                        else:
-                                            st.warning("Type your feedback first")
-                            else:
-                                st.success("✅ Approved and saved to Trello")
-
-                                # ── STEP 5: Write Automation ──────────────
-                                _step_header("5", "Write Automation Code")
-                                auto_key = f"automation_{card.id}"
-                                auto_result = st.session_state.get(auto_key)
-
-                                if auto_result:
-                                    # Show result from previous run
-                                    kind = auto_result.get("kind", "?")
-                                    branch = auto_result.get("branch", "")
-                                    files = auto_result.get("files_written", [])
-                                    pushed = auto_result.get("pushed", False)
-                                    err = auto_result.get("error", "")
-
-                                    if err:
-                                        st.error(f"❌ Automation failed: {err}")
-                                        if st.button("🔄 Retry", key=f"retry_auto_{card.id}"):
-                                            del st.session_state[auto_key]
-                                            st.rerun()
+                                            except Exception as e:
+                                                st.warning(f"Trello saved ✅ but Sheets failed: {e}")
                                     else:
-                                        kind_badge = "🆕 New feature" if kind == "new" else "✏️ Existing feature"
-                                        agent_steps = auto_result.get("chrome_trace_steps", 0)
-                                        agent_badge = f" · 🌐 {agent_steps}-step agent trace" if agent_steps else ""
-                                        st.success(f"{kind_badge} · {len(files)} file(s) written{agent_badge}")
-                                        for f in files:
-                                            st.caption(f"  📄 `{f}`")
+                                        st.success("✅ Saved to Trello card!")
 
-                                        # ── TC filter summary ───────────────
-                                        tc_summary = auto_result.get("tc_filter_summary", {})
-                                        if tc_summary:
-                                            total = tc_summary.get("total", 0)
-                                            kept  = tc_summary.get("kept", 0)
-                                            neg   = tc_summary.get("negative", 0)
-                                            st.caption(
-                                                f"📊 Test cases: {kept}/{total} automated "
-                                                f"(✅ {tc_summary.get('positive',0)} positive · "
-                                                f"⚡ {tc_summary.get('edge',0)} edge · "
-                                                f"🚫 {neg} negative skipped — manual only)"
+                                    approved_store[card.id] = True
+
+                                    # 3. Update RAG knowledge base
+                                    _ac_for_rag = (
+                                        st.session_state.get(f"ac_suggestion_{card.id}")
+                                        or card.desc or ""
+                                    )
+                                    rag_result = {"chunks_added": 0, "error": ""}
+                                    try:
+                                        from pipeline.rag_updater import update_rag_from_card
+                                        with st.spinner("📚 Updating knowledge base…"):
+                                            rag_result = update_rag_from_card(
+                                                card_id=card.id,
+                                                card_name=card.name,
+                                                description=card.desc or "",
+                                                acceptance_criteria=_ac_for_rag,
+                                                test_cases=tc,
+                                                release=current_release,
                                             )
-                                        if branch:
-                                            st.info(f"📦 Branch: `{branch}`")
-
-                                        # ── Auto-fix results ────────────────
-                                        fix_history = auto_result.get("fix_history", [])
-                                        if fix_history:
-                                            fix_passed = auto_result.get("fix_passed", False)
-                                            fix_iters  = auto_result.get("fix_iterations", 0)
-                                            if fix_passed:
-                                                st.success(f"✅ Tests passing after {fix_iters} run(s)")
-                                            else:
-                                                st.error(
-                                                    f"❌ Tests still failing after {fix_iters} auto-fix attempt(s) — "
-                                                    f"push blocked. Fix locally and push manually."
-                                                )
-                                            with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
-                                                for run in fix_history:
-                                                    icon = "✅" if run["passed"] else "❌"
-                                                    st.markdown(f"**{icon} Iteration {run['iteration']}**")
-                                                    if run.get("fixed_files"):
-                                                        st.caption("Fixed: " + ", ".join(f"`{x}`" for x in run["fixed_files"]))
-                                                    with st.expander(f"Output (iter {run['iteration']})", expanded=False):
-                                                        st.code(run.get("output", "")[-2000:], language="text")
-
-                                        push_err = auto_result.get("push_error", "")
-                                        if pushed:
-                                            st.success("✅ Pushed to origin")
-                                        elif push_err and "skipped" in push_err.lower():
-                                            st.warning(f"⚠️ {push_err}")
-                                        elif branch and not pushed:
-                                            col_push, col_rerun = st.columns(2)
-                                            with col_push:
-                                                if st.button("🚀 Push to origin", key=f"push_{card.id}", use_container_width=True):
-                                                    from pipeline.automation_writer import _push_branch
-                                                    ok, out = _push_branch(branch)
-                                                    if ok:
-                                                        st.success(f"✅ Pushed `{branch}` to origin!")
-                                                        auto_result["pushed"] = True
-                                                        st.session_state[auto_key] = auto_result
-                                                    else:
-                                                        st.error(f"Push failed: {out}")
-                                            with col_rerun:
-                                                if st.button("🔄 Re-run on different branch", key=f"rerun_auto_{card.id}", use_container_width=True):
-                                                    del st.session_state[auto_key]
-                                                    st.rerun()
+                                        if rag_result["error"]:
+                                            st.warning(f"⚠️ RAG update failed: {rag_result['error']}")
                                         else:
-                                            if st.button("🔄 Re-run on different branch", key=f"rerun_auto2_{card.id}"):
+                                            st.caption(
+                                                f"📚 Knowledge base updated "
+                                                f"({rag_result['chunks_added']} chunks added)"
+                                            )
+                                    except Exception as _rag_exc:
+                                        st.warning(f"⚠️ RAG update skipped: {_rag_exc}")
+
+                                    # 4. Save to History
+                                    st.session_state.pipeline_runs[card.id] = {
+                                        "card_name":   card.name,
+                                        "card_url":    card.url or "",
+                                        "release":     current_release,
+                                        "test_cases":  tc[:500] + ("…" if len(tc) > 500 else ""),
+                                        "rag_chunks":  rag_result.get("chunks_added", 0),
+                                        "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                    }
+                                    _save_history(st.session_state.pipeline_runs)
+
+                                    st.rerun()
+
+                            with col_edit:
+                                feedback = st.text_input(
+                                    "✏️ Request changes",
+                                    placeholder="e.g. Add a test case for Saturday delivery, change TC-2 priority to High",
+                                    key=f"feedback_{card.id}",
+                                )
+                                if st.button("🔄 Regenerate", key=f"regen_{card.id}",
+                                             use_container_width=True):
+                                    if feedback.strip():
+                                        with st.spinner("Claude is updating test cases…"):
+                                            tc_store[card.id] = regenerate_with_feedback(
+                                                card, tc, feedback
+                                            )
+                                        st.rerun()
+                                    else:
+                                        st.warning("Type your feedback first")
+                        else:
+                            st.success("✅ Approved and saved to Trello")
+
+                            # ── STEP 5: Write Automation ──────────────
+                            _step_header("5", "Write Automation Code")
+                            auto_key = f"automation_{card.id}"
+                            auto_result = st.session_state.get(auto_key)
+
+                            if auto_result:
+                                # Show result from previous run
+                                kind = auto_result.get("kind", "?")
+                                branch = auto_result.get("branch", "")
+                                files = auto_result.get("files_written", [])
+                                pushed = auto_result.get("pushed", False)
+                                err = auto_result.get("error", "")
+
+                                if err:
+                                    st.error(f"❌ Automation failed: {err}")
+                                    if st.button("🔄 Retry", key=f"retry_auto_{card.id}"):
+                                        del st.session_state[auto_key]
+                                        st.rerun()
+                                else:
+                                    kind_badge = "🆕 New feature" if kind == "new" else "✏️ Existing feature"
+                                    agent_steps = auto_result.get("chrome_trace_steps", 0)
+                                    agent_badge = f" · 🌐 {agent_steps}-step agent trace" if agent_steps else ""
+                                    st.success(f"{kind_badge} · {len(files)} file(s) written{agent_badge}")
+                                    for f in files:
+                                        st.caption(f"  📄 `{f}`")
+
+                                    # ── TC filter summary ───────────────
+                                    tc_summary = auto_result.get("tc_filter_summary", {})
+                                    if tc_summary:
+                                        total = tc_summary.get("total", 0)
+                                        kept  = tc_summary.get("kept", 0)
+                                        neg   = tc_summary.get("negative", 0)
+                                        st.caption(
+                                            f"📊 Test cases: {kept}/{total} automated "
+                                            f"(✅ {tc_summary.get('positive',0)} positive · "
+                                            f"⚡ {tc_summary.get('edge',0)} edge · "
+                                            f"🚫 {neg} negative skipped — manual only)"
+                                        )
+                                    if branch:
+                                        st.info(f"📦 Branch: `{branch}`")
+
+                                    # ── Auto-fix results ────────────────
+                                    fix_history = auto_result.get("fix_history", [])
+                                    if fix_history:
+                                        fix_passed = auto_result.get("fix_passed", False)
+                                        fix_iters  = auto_result.get("fix_iterations", 0)
+                                        if fix_passed:
+                                            st.success(f"✅ Tests passing after {fix_iters} run(s)")
+                                        else:
+                                            st.error(
+                                                f"❌ Tests still failing after {fix_iters} auto-fix attempt(s) — "
+                                                f"push blocked. Fix locally and push manually."
+                                            )
+                                        with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
+                                            for run in fix_history:
+                                                icon = "✅" if run["passed"] else "❌"
+                                                st.markdown(f"**{icon} Iteration {run['iteration']}**")
+                                                if run.get("fixed_files"):
+                                                    st.caption("Fixed: " + ", ".join(f"`{x}`" for x in run["fixed_files"]))
+                                                with st.expander(f"Output (iter {run['iteration']})", expanded=False):
+                                                    st.code(run.get("output", "")[-2000:], language="text")
+
+                                    push_err = auto_result.get("push_error", "")
+                                    if pushed:
+                                        st.success("✅ Pushed to origin")
+                                    elif push_err and "skipped" in push_err.lower():
+                                        st.warning(f"⚠️ {push_err}")
+                                    elif branch and not pushed:
+                                        col_push, col_rerun = st.columns(2)
+                                        with col_push:
+                                            if st.button("🚀 Push to origin", key=f"push_{card.id}", use_container_width=True):
+                                                from pipeline.automation_writer import _push_branch
+                                                ok, out = _push_branch(branch)
+                                                if ok:
+                                                    st.success(f"✅ Pushed `{branch}` to origin!")
+                                                    auto_result["pushed"] = True
+                                                    st.session_state[auto_key] = auto_result
+                                                else:
+                                                    st.error(f"Push failed: {out}")
+                                        with col_rerun:
+                                            if st.button("🔄 Re-run on different branch", key=f"rerun_auto_{card.id}", use_container_width=True):
                                                 del st.session_state[auto_key]
                                                 st.rerun()
+                                    else:
+                                        if st.button("🔄 Re-run on different branch", key=f"rerun_auto2_{card.id}"):
+                                            del st.session_state[auto_key]
+                                            st.rerun()
 
-                                    # ── QA Retrospective ─────────────────────
-                                    st.divider()
-                                    _retro_feedback_count = 0
+                                # ── QA Retrospective ─────────────────────
+                                st.divider()
+                                _retro_feedback_count = 0
+                                try:
+                                    from pipeline.qa_feedback import get_feedback_count
+                                    _retro_feedback_count = get_feedback_count()
+                                except Exception:
+                                    pass
+                                _retro_label = (
+                                    f"📝 QA Retrospective  ·  📚 {_retro_feedback_count} learning(s) in knowledge base"
+                                    if _retro_feedback_count > 0
+                                    else "📝 QA Retrospective  —  Help the AI improve on the next card"
+                                )
+                                with st.expander(_retro_label, expanded=False):
+                                    st.caption(
+                                        "Tell the AI what it missed or got wrong this card. "
+                                        "Your feedback is saved and used automatically on future cards — "
+                                        "no retraining needed."
+                                    )
+
+                                    # Load any existing saved feedback for this card
+                                    _retro_key = f"retro_loaded_{card.id}"
+                                    _retro_data_key = f"retro_data_{card.id}"
+                                    if _retro_key not in st.session_state:
+                                        try:
+                                            from pipeline.qa_feedback import load_feedback
+                                            _existing_fb = load_feedback(card.id)
+                                        except Exception:
+                                            _existing_fb = None
+                                        st.session_state[_retro_key] = True
+                                        st.session_state[_retro_data_key] = _existing_fb
+
+                                    _existing_fb = st.session_state.get(_retro_data_key)
+
+                                    if _existing_fb:
+                                        st.success(
+                                            f"✅ Feedback already saved for this card "
+                                            f"(saved {_existing_fb.date}). "
+                                            "Edit below to update."
+                                        )
+
+                                    # ── AC Gaps ────────────────────────────
+                                    st.markdown("**🔴 AC Gaps** — scenarios the AI missed in Acceptance Criteria")
+                                    _ac_default = "\n".join(_existing_fb.ac_misses) if _existing_fb else ""
+                                    _ac_input = st.text_area(
+                                        "AC gaps",
+                                        value=_ac_default,
+                                        placeholder=(
+                                            "One per line. e.g.:\n"
+                                            "Missed the case where product weight > 150 lbs triggers LTL freight\n"
+                                            "No scenario for COD payment rejection at checkout"
+                                        ),
+                                        height=110,
+                                        key=f"retro_ac_{card.id}",
+                                        label_visibility="collapsed",
+                                    )
+
+                                    # ── TC Issues ──────────────────────────
+                                    st.markdown("**🟠 TC Issues** — wrong or missing test cases")
+                                    _tc_default = "\n".join(_existing_fb.tc_issues) if _existing_fb else ""
+                                    _tc_input = st.text_area(
+                                        "TC issues",
+                                        value=_tc_default,
+                                        placeholder=(
+                                            "One per line. e.g.:\n"
+                                            "TC-3 didn't cover the Saturday Delivery edge case\n"
+                                            "Missing negative TC for when AU Post account is suspended"
+                                        ),
+                                        height=100,
+                                        key=f"retro_tc_{card.id}",
+                                        label_visibility="collapsed",
+                                    )
+
+                                    # ── Automation Issues ───────────────────
+                                    st.markdown("**🟡 Automation Issues** — problems in the generated Playwright code")
+                                    _auto_default = "\n".join(_existing_fb.automation_issues) if _existing_fb else ""
+                                    _auto_input = st.text_area(
+                                        "Automation issues",
+                                        value=_auto_default,
+                                        placeholder=(
+                                            "One per line. e.g.:\n"
+                                            "Label download step doesn't wait for print dialog to close\n"
+                                            "Wrong locator used for the carrier service dropdown\n"
+                                            "Missing assertion after rate calculation"
+                                        ),
+                                        height=100,
+                                        key=f"retro_auto_{card.id}",
+                                        label_visibility="collapsed",
+                                    )
+
+                                    # ── What Went Well ──────────────────────
+                                    st.markdown("**🟢 What Went Well** — positive reinforcement")
+                                    _well_default = "\n".join(_existing_fb.what_went_well) if _existing_fb else ""
+                                    _well_input = st.text_area(
+                                        "What went well",
+                                        value=_well_default,
+                                        placeholder=(
+                                            "One per line. e.g.:\n"
+                                            "Rate calculation scenarios were spot-on\n"
+                                            "Automation selectors were accurate for this feature"
+                                        ),
+                                        height=80,
+                                        key=f"retro_well_{card.id}",
+                                        label_visibility="collapsed",
+                                    )
+
+                                    # ── Overall Notes ───────────────────────
+                                    _notes_default = _existing_fb.overall_notes if _existing_fb else ""
+                                    _notes_input = st.text_area(
+                                        "💬 Overall notes (optional)",
+                                        value=_notes_default,
+                                        placeholder="Any general comment about this card's pipeline run…",
+                                        height=70,
+                                        key=f"retro_notes_{card.id}",
+                                    )
+
+                                    # ── Save button ─────────────────────────
+                                    _retro_save_col, _retro_info_col = st.columns([1, 2])
+                                    with _retro_save_col:
+                                        if st.button(
+                                            "💾 Save & Learn",
+                                            key=f"retro_save_{card.id}",
+                                            use_container_width=True,
+                                            type="primary",
+                                        ):
+                                            import datetime as _dt
+                                            # Parse multi-line inputs → clean list
+                                            def _lines(txt):
+                                                return [l.strip() for l in txt.strip().splitlines() if l.strip()]
+
+                                            _has_content = any([
+                                                _ac_input.strip(),
+                                                _tc_input.strip(),
+                                                _auto_input.strip(),
+                                                _well_input.strip(),
+                                                _notes_input.strip(),
+                                            ])
+                                            if not _has_content:
+                                                st.warning("Add at least one piece of feedback before saving.")
+                                            else:
+                                                from pipeline.qa_feedback import QAFeedback, save_feedback as _save_fb
+                                                _fb = QAFeedback(
+                                                    card_id=card.id,
+                                                    card_name=card.name,
+                                                    date=_dt.date.today().isoformat(),
+                                                    ac_misses=_lines(_ac_input),
+                                                    tc_issues=_lines(_tc_input),
+                                                    automation_issues=_lines(_auto_input),
+                                                    what_went_well=_lines(_well_input),
+                                                    overall_notes=_notes_input.strip(),
+                                                )
+                                                with st.spinner("Saving feedback & updating knowledge base…"):
+                                                    _fb_res = _save_fb(_fb)
+
+                                                if _fb_res["ok"]:
+                                                    st.session_state[_retro_data_key] = _fb
+                                                    st.success(
+                                                        f"✅ Saved! {_fb_res['chunks_added']} chunk(s) added "
+                                                        f"to knowledge base — future cards will learn from this."
+                                                    )
+                                                else:
+                                                    st.error(f"❌ Save failed: {_fb_res['error']}")
+
+                                    with _retro_info_col:
+                                        st.caption(
+                                            "📖 This feedback is embedded into the AI's knowledge base. "
+                                            "Next time a similar feature comes through, Claude will automatically "
+                                            "reference these lessons when writing AC and test cases."
+                                        )
+
+                            else:
+                                # Detection preview
+                                det_key = f"detection_{card.id}"
+                                if det_key not in st.session_state and api_ok:
                                     try:
-                                        from pipeline.qa_feedback import get_feedback_count
-                                        _retro_feedback_count = get_feedback_count()
+                                        from pipeline.feature_detector import detect_feature
+                                        det = detect_feature(card.name, card.desc or "")
+                                        st.session_state[det_key] = det
                                     except Exception:
                                         pass
-                                    _retro_label = (
-                                        f"📝 QA Retrospective  ·  📚 {_retro_feedback_count} learning(s) in knowledge base"
-                                        if _retro_feedback_count > 0
-                                        else "📝 QA Retrospective  —  Help the AI improve on the next card"
+
+                                det = st.session_state.get(det_key)
+                                if det:
+                                    kind_icon = "🆕" if det.kind == "new" else "✏️"
+                                    st.caption(
+                                        f"{kind_icon} **{det.kind.capitalize()} feature** "
+                                        f"({det.confidence:.0%} confidence) — {det.reasoning[:120]}"
                                     )
-                                    with st.expander(_retro_label, expanded=False):
-                                        st.caption(
-                                            "Tell the AI what it missed or got wrong this card. "
-                                            "Your feedback is saved and used automatically on future cards — "
-                                            "no retraining needed."
-                                        )
+                                    if det.related_files:
+                                        st.caption("Related files: " + ", ".join(
+                                            f"`{f}`" for f in det.related_files[:3]
+                                        ))
 
-                                        # Load any existing saved feedback for this card
-                                        _retro_key = f"retro_loaded_{card.id}"
-                                        _retro_data_key = f"retro_data_{card.id}"
-                                        if _retro_key not in st.session_state:
-                                            try:
-                                                from pipeline.qa_feedback import load_feedback
-                                                _existing_fb = load_feedback(card.id)
-                                            except Exception:
-                                                _existing_fb = None
-                                            st.session_state[_retro_key] = True
-                                            st.session_state[_retro_data_key] = _existing_fb
-
-                                        _existing_fb = st.session_state.get(_retro_data_key)
-
-                                        if _existing_fb:
-                                            st.success(
-                                                f"✅ Feedback already saved for this card "
-                                                f"(saved {_existing_fb.date}). "
-                                                "Edit below to update."
-                                            )
-
-                                        # ── AC Gaps ────────────────────────────
-                                        st.markdown("**🔴 AC Gaps** — scenarios the AI missed in Acceptance Criteria")
-                                        _ac_default = "\n".join(_existing_fb.ac_misses) if _existing_fb else ""
-                                        _ac_input = st.text_area(
-                                            "AC gaps",
-                                            value=_ac_default,
-                                            placeholder=(
-                                                "One per line. e.g.:\n"
-                                                "Missed the case where product weight > 150 lbs triggers LTL freight\n"
-                                                "No scenario for COD payment rejection at checkout"
-                                            ),
-                                            height=110,
-                                            key=f"retro_ac_{card.id}",
+                                col_auto, col_branch = st.columns([3, 2])
+                                with col_branch:
+                                    _NEW_BRANCH_OPTION = "➕ New branch…"
+                                    existing_branches = _get_repo_branches()
+                                    default_slug = f"automation/{re.sub(r'[^a-z0-9]+', '-', card.name.lower()).strip('-')[:30]}"
+                                    branch_options = existing_branches + [_NEW_BRANCH_OPTION]
+                                    # Pre-select the auto-slug if it already exists, else "New branch"
+                                    default_idx = branch_options.index(default_slug) if default_slug in branch_options else len(branch_options) - 1
+                                    selected_branch = st.selectbox(
+                                        "Branch",
+                                        options=branch_options,
+                                        index=default_idx,
+                                        key=f"branch_select_{card.id}",
+                                        label_visibility="collapsed",
+                                    )
+                                    if selected_branch == _NEW_BRANCH_OPTION:
+                                        auto_branch_input = st.text_input(
+                                            "New branch name",
+                                            value=default_slug,
+                                            key=f"branch_input_{card.id}",
                                             label_visibility="collapsed",
                                         )
-
-                                        # ── TC Issues ──────────────────────────
-                                        st.markdown("**🟠 TC Issues** — wrong or missing test cases")
-                                        _tc_default = "\n".join(_existing_fb.tc_issues) if _existing_fb else ""
-                                        _tc_input = st.text_area(
-                                            "TC issues",
-                                            value=_tc_default,
-                                            placeholder=(
-                                                "One per line. e.g.:\n"
-                                                "TC-3 didn't cover the Saturday Delivery edge case\n"
-                                                "Missing negative TC for when AU Post account is suspended"
-                                            ),
-                                            height=100,
-                                            key=f"retro_tc_{card.id}",
-                                            label_visibility="collapsed",
-                                        )
-
-                                        # ── Automation Issues ───────────────────
-                                        st.markdown("**🟡 Automation Issues** — problems in the generated Playwright code")
-                                        _auto_default = "\n".join(_existing_fb.automation_issues) if _existing_fb else ""
-                                        _auto_input = st.text_area(
-                                            "Automation issues",
-                                            value=_auto_default,
-                                            placeholder=(
-                                                "One per line. e.g.:\n"
-                                                "Label download step doesn't wait for print dialog to close\n"
-                                                "Wrong locator used for the carrier service dropdown\n"
-                                                "Missing assertion after rate calculation"
-                                            ),
-                                            height=100,
-                                            key=f"retro_auto_{card.id}",
-                                            label_visibility="collapsed",
-                                        )
-
-                                        # ── What Went Well ──────────────────────
-                                        st.markdown("**🟢 What Went Well** — positive reinforcement")
-                                        _well_default = "\n".join(_existing_fb.what_went_well) if _existing_fb else ""
-                                        _well_input = st.text_area(
-                                            "What went well",
-                                            value=_well_default,
-                                            placeholder=(
-                                                "One per line. e.g.:\n"
-                                                "Rate calculation scenarios were spot-on\n"
-                                                "Automation selectors were accurate for this feature"
-                                            ),
-                                            height=80,
-                                            key=f"retro_well_{card.id}",
-                                            label_visibility="collapsed",
-                                        )
-
-                                        # ── Overall Notes ───────────────────────
-                                        _notes_default = _existing_fb.overall_notes if _existing_fb else ""
-                                        _notes_input = st.text_area(
-                                            "💬 Overall notes (optional)",
-                                            value=_notes_default,
-                                            placeholder="Any general comment about this card's pipeline run…",
-                                            height=70,
-                                            key=f"retro_notes_{card.id}",
-                                        )
-
-                                        # ── Save button ─────────────────────────
-                                        _retro_save_col, _retro_info_col = st.columns([1, 2])
-                                        with _retro_save_col:
-                                            if st.button(
-                                                "💾 Save & Learn",
-                                                key=f"retro_save_{card.id}",
-                                                use_container_width=True,
-                                                type="primary",
-                                            ):
-                                                import datetime as _dt
-                                                # Parse multi-line inputs → clean list
-                                                def _lines(txt):
-                                                    return [l.strip() for l in txt.strip().splitlines() if l.strip()]
-
-                                                _has_content = any([
-                                                    _ac_input.strip(),
-                                                    _tc_input.strip(),
-                                                    _auto_input.strip(),
-                                                    _well_input.strip(),
-                                                    _notes_input.strip(),
-                                                ])
-                                                if not _has_content:
-                                                    st.warning("Add at least one piece of feedback before saving.")
-                                                else:
-                                                    from pipeline.qa_feedback import QAFeedback, save_feedback as _save_fb
-                                                    _fb = QAFeedback(
-                                                        card_id=card.id,
-                                                        card_name=card.name,
-                                                        date=_dt.date.today().isoformat(),
-                                                        ac_misses=_lines(_ac_input),
-                                                        tc_issues=_lines(_tc_input),
-                                                        automation_issues=_lines(_auto_input),
-                                                        what_went_well=_lines(_well_input),
-                                                        overall_notes=_notes_input.strip(),
-                                                    )
-                                                    with st.spinner("Saving feedback & updating knowledge base…"):
-                                                        _fb_res = _save_fb(_fb)
-
-                                                    if _fb_res["ok"]:
-                                                        st.session_state[_retro_data_key] = _fb
-                                                        st.success(
-                                                            f"✅ Saved! {_fb_res['chunks_added']} chunk(s) added "
-                                                            f"to knowledge base — future cards will learn from this."
-                                                        )
-                                                    else:
-                                                        st.error(f"❌ Save failed: {_fb_res['error']}")
-
-                                        with _retro_info_col:
-                                            st.caption(
-                                                "📖 This feedback is embedded into the AI's knowledge base. "
-                                                "Next time a similar feature comes through, Claude will automatically "
-                                                "reference these lessons when writing AC and test cases."
-                                            )
-
-                                else:
-                                    # Detection preview
-                                    det_key = f"detection_{card.id}"
-                                    if det_key not in st.session_state and api_ok:
-                                        try:
-                                            from pipeline.feature_detector import detect_feature
-                                            det = detect_feature(card.name, card.desc or "")
-                                            st.session_state[det_key] = det
-                                        except Exception:
-                                            pass
-
-                                    det = st.session_state.get(det_key)
-                                    if det:
-                                        kind_icon = "🆕" if det.kind == "new" else "✏️"
-                                        st.caption(
-                                            f"{kind_icon} **{det.kind.capitalize()} feature** "
-                                            f"({det.confidence:.0%} confidence) — {det.reasoning[:120]}"
-                                        )
-                                        if det.related_files:
-                                            st.caption("Related files: " + ", ".join(
-                                                f"`{f}`" for f in det.related_files[:3]
-                                            ))
-
-                                    col_auto, col_branch = st.columns([3, 2])
-                                    with col_branch:
-                                        _NEW_BRANCH_OPTION = "➕ New branch…"
-                                        existing_branches = _get_repo_branches()
-                                        default_slug = f"automation/{re.sub(r'[^a-z0-9]+', '-', card.name.lower()).strip('-')[:30]}"
-                                        branch_options = existing_branches + [_NEW_BRANCH_OPTION]
-                                        # Pre-select the auto-slug if it already exists, else "New branch"
-                                        default_idx = branch_options.index(default_slug) if default_slug in branch_options else len(branch_options) - 1
-                                        selected_branch = st.selectbox(
-                                            "Branch",
-                                            options=branch_options,
-                                            index=default_idx,
-                                            key=f"branch_select_{card.id}",
-                                            label_visibility="collapsed",
-                                        )
-                                        if selected_branch == _NEW_BRANCH_OPTION:
-                                            auto_branch_input = st.text_input(
-                                                "New branch name",
-                                                value=default_slug,
-                                                key=f"branch_input_{card.id}",
-                                                label_visibility="collapsed",
-                                            )
-                                        else:
-                                            auto_branch_input = selected_branch
-                                    with col_auto:
-                                        dry_auto = st.checkbox("Dry run (preview only)", key=f"dry_auto_{card.id}", value=False)
-                                        push_auto = st.checkbox("Push to origin after commit", key=f"push_auto_{card.id}")
-
-                                    # ── Step 5a: Chrome Agent option ──────────────────
-                                    # Hidden when Smart AC Verifier has already walked the app —
-                                    # the verified flows feed directly into the automation writer.
-                                    _sav_done = bool(st.session_state.get(f"sav_context_{card.id}"))
-                                    if _sav_done:
-                                        st.caption(
-                                            "✅ Smart AC Verifier already walked the app — "
-                                            "verified flows will be used for code generation."
-                                        )
-                                        use_chrome_agent = False
                                     else:
-                                        is_new_feature = det and det.kind == "new"
-                                        use_chrome_agent = st.checkbox(
-                                            "🌐 Walk app live with Chrome Agent (grounded locators)",
-                                            key=f"use_chrome_{card.id}",
-                                            value=is_new_feature,
-                                            help=(
-                                                "Navigates the real app and captures UI elements. "
-                                                "Run Smart AC Verifier (Step 2b) first for better results — "
-                                                "it walks the app AND verifies each AC scenario."
-                                            ),
-                                        )
+                                        auto_branch_input = selected_branch
+                                with col_auto:
+                                    dry_auto = st.checkbox("Dry run (preview only)", key=f"dry_auto_{card.id}", value=False)
+                                    push_auto = st.checkbox("Push to origin after commit", key=f"push_auto_{card.id}")
 
-                                    if use_chrome_agent:
-                                        # Show Chrome Agent section
-                                        trace_key = f"chrome_trace_{card.id}"
-                                        trace_result = st.session_state.get(trace_key)
-
-                                        if trace_result:
-                                            if trace_result.error:
-                                                # Check if it's the Shopify bot-challenge error
-                                                if "connection-verification" in trace_result.error or "challenge" in trace_result.error.lower():
-                                                    st.error("❌ Chrome Agent: Shopify bot-detection blocked the explorer")
-                                                    st.warning(
-                                                        "**Fix:** Shopify rejected the automated session.\n\n"
-                                                        "1. Open a terminal in the automation repo\n"
-                                                        "2. Run: `npx playwright test --project=setup --headed`\n"
-                                                        "3. A Chrome window opens — log in manually\n"
-                                                        "4. Close the window — auth.json is saved automatically\n"
-                                                        "5. Click **Explore App** again"
-                                                    )
-                                                else:
-                                                    st.error(f"❌ Chrome Agent: {trace_result.error}")
-                                            else:
-                                                with st.expander(
-                                                    f"🌐 Agent explored {len(trace_result.steps)} steps — {len(trace_result.final_elements.splitlines())} elements captured",
-                                                    expanded=False,
-                                                ):
-                                                    st.markdown(trace_result.navigation_path)
-                                                    unique_els = trace_result.final_elements.splitlines()
-                                                    if unique_els:
-                                                        st.caption("Elements captured:")
-                                                        for el in unique_els[:25]:
-                                                            st.caption(f"  • {el}")
-
-                                        # Detect app_path from POM registry for this card
-                                        chrome_app_path = ""
-                                        try:
-                                            from pipeline.automation_writer import find_pom
-                                            pom_entry = find_pom(card.name)
-                                            if pom_entry:
-                                                chrome_app_path = pom_entry.get("app_path", "")
-                                        except Exception:
-                                            pass
-
-                                        col_explore, col_apppath = st.columns([2, 3])
-                                        with col_apppath:
-                                            chrome_app_path = st.text_input(
-                                                "App path (optional)",
-                                                value=chrome_app_path,
-                                                placeholder="e.g. settings/additional-services",
-                                                key=f"chrome_path_{card.id}",
-                                                label_visibility="collapsed",
-                                            )
-                                        with col_explore:
-                                            if st.button(
-                                                "🌐 Explore App",
-                                                key=f"explore_{card.id}",
-                                                use_container_width=True,
-                                                help="Opens Chrome, walks through the feature, captures real UI elements",
-                                            ):
-                                                from pipeline.chrome_agent import explore_with_agent
-                                                with st.spinner("🌐 Chrome Agent exploring the app… (takes ~30s)"):
-                                                    trace = explore_with_agent(
-                                                        card_name=card.name,
-                                                        acceptance_criteria=card.desc or "",
-                                                        app_path=chrome_app_path,
-                                                        max_steps=12,
-                                                    )
-                                                st.session_state[trace_key] = trace
-                                                st.rerun()
-
-                                    # ── QA context for this card ──────────────────────
-                                    qa_context_key = f"qa_ctx_{card.id}"
-                                    qa_context = st.text_area(
-                                        "🧪 QA Test Context (optional)",
-                                        key=qa_context_key,
-                                        placeholder=(
-                                            "Tell the AI specific data to use, e.g.:\n"
-                                            "• Use HS code 123456 on product 'Test Shirt'\n"
-                                            "• Enable Dry Ice with weight 2.5 kg\n"
-                                            "• Use Australia Post Express Post service"
-                                        ),
-                                        height=90,
-                                        help="This context is passed to the AI so generated tests use the right product, settings, or values.",
+                                # ── Step 5a: Chrome Agent option ──────────────────
+                                # Hidden when Smart AC Verifier has already walked the app —
+                                # the verified flows feed directly into the automation writer.
+                                _sav_done = bool(st.session_state.get(f"sav_context_{card.id}"))
+                                if _sav_done:
+                                    st.caption(
+                                        "✅ Smart AC Verifier already walked the app — "
+                                        "verified flows will be used for code generation."
                                     )
-
-                                    # ── Auto-fix toggle ────────────────────────────────
-                                    auto_fix_enabled = st.toggle(
-                                        "🔄 Auto-run & fix until passing",
-                                        key=f"auto_fix_{card.id}",
-                                        value=False,
-                                        help=(
-                                            "After writing code, automatically run the tests. "
-                                            "If they fail, Claude reads the errors and fixes the code, "
-                                            "then re-runs. Repeats up to 3 times."
-                                        ),
-                                    )
-
-                                    # ── Generate code button ───────────────────────────
-                                    # Priority: Smart AC Verifier context > Chrome Agent trace
-                                    _sav_ctx    = st.session_state.get(f"sav_context_{card.id}", "")
-                                    trace_for_gen = st.session_state.get(f"chrome_trace_{card.id}") if use_chrome_agent else None
-                                    chrome_context = (
-                                        _sav_ctx                          # Smart AC verified flows first
-                                        or (
-                                            trace_for_gen.to_context_string()
-                                            if trace_for_gen and not trace_for_gen.error
-                                            else ""
-                                        )
-                                    )
-                                    if st.button("⚙️ Write Automation Code", key=f"auto_{card.id}",
-                                                 use_container_width=True,
-                                                 type="primary"):
-                                        from pipeline.automation_writer import write_automation
-                                        label = (
-                                            "✍️ Generating tests from verified AC flows…"
-                                            if _sav_ctx
-                                            else "✍️ Generating tests from live app trace…"
-                                            if chrome_context
-                                            else "✍️ Claude is writing Playwright tests…"
-                                        )
-                                        fix_status_placeholder = st.empty()
-                                        def _on_fix_progress(iteration, status, output, _ph=fix_status_placeholder):
-                                            _ph.info(f"🔄 **Auto-fix iteration {iteration}/3** — {status}")
-                                        with st.spinner(label):
-                                            _tc_md = tc_store.get(card.id, "")
-                                            if not _tc_md:
-                                                # Session was reloaded — recover TCs from Trello comment
-                                                _tc_md = next(
-                                                    (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
-                                                    ""
-                                                )
-                                            result = write_automation(
-                                                card_name=card.name,
-                                                test_cases_markdown=_tc_md,
-                                                acceptance_criteria=card.desc or "",
-                                                branch_name=auto_branch_input,
-                                                dry_run=dry_auto,
-                                                push=push_auto,
-                                                chrome_trace_context=chrome_context,
-                                                qa_context=qa_context.strip(),
-                                                auto_fix=auto_fix_enabled and not dry_auto,
-                                                fix_iterations=3,
-                                                on_fix_progress=_on_fix_progress,
-                                            )
-                                            # Record how many agent steps contributed
-                                            if chrome_context and trace_for_gen:
-                                                result["chrome_trace_steps"] = len(trace_for_gen.steps)
-                                        st.session_state[auto_key] = result
-                                        st.rerun()
-
-                # Bulk approve all
-                st.divider()
-                if approved_count < len(cards):
-                    if st.button("✅ Approve ALL remaining", type="primary"):
-                        trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
-                        remaining = [c for c in cards if not approved_store.get(c.id)]
-                        rag_total = 0
-                        for card in remaining:
-                            if card.id in tc_store:
-                                write_test_cases_to_card(card.id, tc_store[card.id], trello)
-                                approved_store[card.id] = True
-                                # Update RAG for each approved card
-                                _bulk_ac = (
-                                    st.session_state.get(f"ac_suggestion_{card.id}")
-                                    or card.desc or ""
-                                )
-                                try:
-                                    from pipeline.rag_updater import update_rag_from_card
-                                    rag_r = update_rag_from_card(
-                                        card_id=card.id,
-                                        card_name=card.name,
-                                        description=card.desc or "",
-                                        acceptance_criteria=_bulk_ac,
-                                        test_cases=tc_store[card.id],
-                                        release=current_release,
-                                    )
-                                    rag_total += rag_r.get("chunks_added", 0)
-                                except Exception:
-                                    rag_r = {"chunks_added": 0}
-                                # Save to History
-                                st.session_state.pipeline_runs[card.id] = {
-                                    "card_name":   card.name,
-                                    "card_url":    card.url or "",
-                                    "release":     current_release,
-                                    "test_cases":  tc_store[card.id][:500],
-                                    "rag_chunks":  rag_r.get("chunks_added", 0),
-                                    "approved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                }
-                                _save_history(st.session_state.pipeline_runs)
-                        st.success(
-                            f"✅ All {len(remaining)} cards saved to Trello! "
-                            f"📚 {rag_total} RAG chunks updated."
-                        )
-                        st.rerun()
-
-                # ── STAGE 6: Run Tests + Post to Slack ───────────────────
-                st.divider()
-                st.markdown(
-                    '<div class="step-chip">⑥ Run Automation &amp; Post to Slack</div>',
-                    unsafe_allow_html=True,
-                )
-                st.caption(
-                    "Run Playwright tests scoped to this release's generated spec files, "
-                    "then post results to Slack."
-                )
-
-                from pipeline.slack_client import slack_configured, post_results
-                from pipeline.test_runner import run_release_tests
-
-                # Collect all spec files written for this release
-                all_specs: list[str] = []
-                card_spec_map: dict[str, str] = {}
-                for card in cards:
-                    auto_res = st.session_state.get(f"automation_{card.id}", {})
-                    files = auto_res.get("files_written", [])
-                    spec = next((f for f in files if f.endswith(".spec.ts")), "")
-                    if spec:
-                        all_specs.append(spec)
-                        card_spec_map[card.name] = spec
-
-                n_approved  = sum(1 for c in cards if approved_store.get(c.id))
-                n_with_spec = len(all_specs)
-
-                col_r1, col_r2, col_r3 = st.columns(3)
-                col_r1.metric("✅ Cards approved", f"{n_approved}/{len(cards)}")
-                col_r2.metric("📄 Spec files ready", n_with_spec)
-                col_r3.metric("📣 Slack", "Configured ✅" if slack_configured() else "Not set ❌")
-
-                if not slack_configured():
-                    st.warning(
-                        "⚠️ Slack not configured — add `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` to `.env` "
-                        "to enable result posting. Tests can still be run without Slack."
-                    )
-
-                run_scope = st.radio(
-                    "Test scope",
-                    ["This release only (generated specs)", "Full test suite"],
-                    index=0,
-                    horizontal=True,
-                    key="run_scope",
-                )
-
-                release_only = run_scope.startswith("This")
-                no_specs_warning = release_only and n_with_spec == 0
-
-                if no_specs_warning:
-                    st.warning(
-                        "⚠️ No spec files generated yet for this release. "
-                        "Complete **Step 5 — Write Automation Code** for at least one card first, "
-                        "or switch scope to **Full test suite**."
-                    )
-
-                col_run, col_slack_only = st.columns([2, 1])
-                with col_run:
-                    run_disabled = n_approved == 0 or no_specs_warning
-                    if st.button(
-                        "▶️ Run Tests" + (f" ({n_with_spec} specs)" if release_only and n_with_spec else ""),
-                        type="primary",
-                        use_container_width=True,
-                        disabled=run_disabled,
-                        key="run_tests_btn",
-                    ):
-                        specs_to_run = all_specs if release_only else []
-                        with st.spinner(f"Running Playwright tests… ({len(specs_to_run) or 'full suite'})"):
-                            run_result = run_release_tests(
-                                release=current_release,
-                                spec_files=specs_to_run,
-                                card_results_map=card_spec_map if specs_to_run else None,
-                            )
-                        st.session_state["last_run_result"] = run_result
-                        st.rerun()
-
-                # Show last run result
-                run_result = st.session_state.get("last_run_result")
-                if run_result and run_result.release == current_release:
-                    st.divider()
-                    res_icon = "✅" if run_result.failed == 0 else "❌"
-                    st.markdown(f"#### {res_icon} Test Run — {run_result.release}")
-
-                    rc1, rc2, rc3, rc4 = st.columns(4)
-                    rc1.metric("Total",   run_result.total)
-                    rc2.metric("✅ Passed", run_result.passed)
-                    rc3.metric("❌ Failed", run_result.failed)
-                    rc4.metric("Duration", f"{run_result.duration_secs:.0f}s")
-
-                    if run_result.card_results:
-                        st.markdown("**Per-card breakdown:**")
-                        for cr in run_result.card_results:
-                            icon = "✅" if cr.get("failed", 0) == 0 else "❌"
-                            st.caption(
-                                f"{icon} **{cr['card_name']}** — `{cr.get('spec', '')}` "
-                                f"· {cr.get('passed', 0)} passed · {cr.get('failed', 0)} failed"
-                            )
-
-                    if run_result.failed_tests:
-                        with st.expander(f"❌ {len(run_result.failed_tests)} failed test(s)", expanded=True):
-                            for t in run_result.failed_tests:
-                                st.code(t, language=None)
-
-                    # Slack post
-                    st.divider()
-                    slack_key = f"slack_posted_{current_release}"
-                    already_posted = st.session_state.get(slack_key, False)
-
-                    if already_posted:
-                        st.success("📣 Results already posted to Slack")
-                        if st.button("📣 Post again to Slack", key="repost_slack"):
-                            st.session_state.pop(slack_key, None)
-                            st.rerun()
-                    else:
-                        if slack_configured():
-                            if st.button("📣 Post Results to Slack", type="primary",
-                                         use_container_width=True, key="post_slack"):
-                                with st.spinner("Posting to Slack…"):
-                                    slack_res = post_results(run_result)
-                                if slack_res["ok"]:
-                                    st.success(f"✅ Posted to Slack! (ts={slack_res['ts']})")
-                                    st.session_state[slack_key] = True
+                                    use_chrome_agent = False
                                 else:
-                                    st.error(f"❌ Slack post failed: {slack_res['error']}")
-                        else:
-                            st.info(
-                                "Configure Slack to enable posting. "
-                                "You can copy the summary above manually."
-                            )
-                            # Show copyable summary
-                            summary = (
-                                f"*AU Post Automation — {run_result.release}*\n"
-                                f"{run_result.status} · "
-                                f"{run_result.passed}/{run_result.total} passed "
-                                f"({run_result.pass_rate}) · {run_result.duration_secs:.0f}s\n"
-                            )
-                            if run_result.failed_tests:
-                                summary += "\n*Failed:*\n" + "\n".join(f"• {t}" for t in run_result.failed_tests[:5])
-                            st.code(summary, language=None)
-
-                # ── STAGE 7: Generate Documentation ──────────────────────────
-                st.divider()
-                st.markdown(
-                    '<div class="step-chip">⑦ Generate Documentation</div>',
-                    unsafe_allow_html=True,
-                )
-                st.caption(
-                    "Generate a feature doc (docs/features/*.md) and CHANGELOG entry "
-                    "for each card in this release."
-                )
-
-                from pipeline.doc_generator import generate_feature_doc
-
-                # Collect cards with automation results for doc generation
-                cards_for_docs = []
-                for card in cards:
-                    auto_res = st.session_state.get(f"automation_{card.id}", {})
-                    files    = auto_res.get("files_written", [])
-                    spec     = next((f for f in files if f.endswith(".spec.ts")), "")
-                    pom      = next((f for f in files if f.endswith(".ts") and "pages" in f), "")
-                    cards_for_docs.append({
-                        "card": card,
-                        "spec_file": spec,
-                        "pom_file": pom,
-                        "has_spec": bool(spec),
-                    })
-
-                n_with_docs_spec = sum(1 for c in cards_for_docs if c["has_spec"])
-                st.caption(
-                    f"{n_with_docs_spec}/{len(cards)} cards have spec files ready · "
-                    f"Docs will be saved to `docs/features/` in the automation repo"
-                )
-
-                # Bulk generate all
-                if st.button(
-                    "📄 Generate Docs for All Cards",
-                    type="primary",
-                    key="gen_all_docs",
-                    disabled=n_approved == 0,
-                ):
-                    doc_errors = []
-                    for item in cards_for_docs:
-                        card = item["card"]
-                        doc_key = f"doc_result_{card.id}"
-                        if doc_key not in st.session_state:
-                            with st.spinner(f"📄 Writing docs for '{card.name}'…"):
-                                doc_res = generate_feature_doc(
-                                    card_name=card.name,
-                                    acceptance_criteria=card.desc or "",
-                                    test_cases=tc_store.get(card.id, ""),
-                                    spec_file=item["spec_file"],
-                                    pom_file=item["pom_file"],
-                                    release=current_release,
-                                )
-                            st.session_state[doc_key] = doc_res
-                            if doc_res["error"]:
-                                doc_errors.append(f"{card.name}: {doc_res['error']}")
-                    if doc_errors:
-                        st.warning("Some docs failed:\n" + "\n".join(doc_errors))
-                    else:
-                        st.success(f"✅ Docs generated for {len(cards_for_docs)} cards")
-                    st.rerun()
-
-                # Per-card doc results
-                for item in cards_for_docs:
-                    card    = item["card"]
-                    doc_key = f"doc_result_{card.id}"
-                    doc_res = st.session_state.get(doc_key)
-
-                    col_dcard, col_dgen = st.columns([4, 1])
-                    with col_dcard:
-                        if doc_res:
-                            if doc_res.get("error"):
-                                st.caption(f"❌ **{card.name}** — {doc_res['error']}")
-                            else:
-                                st.caption(f"✅ **{card.name}** → `{doc_res.get('doc_path', '')}`")
-                        else:
-                            spec_label = f"`{item['spec_file']}`" if item["spec_file"] else "_(no spec yet)_"
-                            st.caption(f"⚪ **{card.name}** — {spec_label}")
-
-                    with col_dgen:
-                        if not doc_res:
-                            if st.button("📄", key=f"gen_doc_{card.id}",
-                                         help="Generate doc for this card"):
-                                with st.spinner(f"Writing doc for '{card.name}'…"):
-                                    doc_res = generate_feature_doc(
-                                        card_name=card.name,
-                                        acceptance_criteria=card.desc or "",
-                                        test_cases=tc_store.get(card.id, ""),
-                                        spec_file=item["spec_file"],
-                                        pom_file=item["pom_file"],
-                                        release=current_release,
+                                    is_new_feature = det and det.kind == "new"
+                                    use_chrome_agent = st.checkbox(
+                                        "🌐 Walk app live with Chrome Agent (grounded locators)",
+                                        key=f"use_chrome_{card.id}",
+                                        value=is_new_feature,
+                                        help=(
+                                            "Navigates the real app and captures UI elements. "
+                                            "Run Smart AC Verifier (Step 2b) first for better results — "
+                                            "it walks the app AND verifies each AC scenario."
+                                        ),
                                     )
-                                st.session_state[doc_key] = doc_res
-                                st.rerun()
 
-                    # Show generated doc preview
-                    if doc_res and not doc_res.get("error") and doc_res.get("doc_content"):
-                        with st.expander(f"📄 Preview: {card.name}", expanded=False):
-                            st.markdown(doc_res["doc_content"])
-                            if doc_res.get("changelog_entry"):
-                                st.caption("**CHANGELOG entry added:**")
-                                st.code(doc_res["changelog_entry"], language="markdown")
+                                if use_chrome_agent:
+                                    # Show Chrome Agent section
+                                    trace_key = f"chrome_trace_{card.id}"
+                                    trace_result = st.session_state.get(trace_key)
 
-                # ── 🐛 Bug Reporter — found during manual QA ─────────────────
-                st.divider()
-                st.markdown(
-                    '<div class="step-chip">🐛 Bug Reporter</div>',
-                    unsafe_allow_html=True,
-                )
-                st.markdown("#### Report a Bug Found During QA")
-                st.caption(
-                    "Describe the issue in plain English → Agent formats it in Jira style → "
-                    "checks Trello backlog for duplicates → you approve → it's raised in Trello."
-                )
+                                    if trace_result:
+                                        if trace_result.error:
+                                            # Check if it's the Shopify bot-challenge error
+                                            if "connection-verification" in trace_result.error or "challenge" in trace_result.error.lower():
+                                                st.error("❌ Chrome Agent: Shopify bot-detection blocked the explorer")
+                                                st.warning(
+                                                    "**Fix:** Shopify rejected the automated session.\n\n"
+                                                    "1. Open a terminal in the automation repo\n"
+                                                    "2. Run: `npx playwright test --project=setup --headed`\n"
+                                                    "3. A Chrome window opens — log in manually\n"
+                                                    "4. Close the window — auth.json is saved automatically\n"
+                                                    "5. Click **Explore App** again"
+                                                )
+                                            else:
+                                                st.error(f"❌ Chrome Agent: {trace_result.error}")
+                                        else:
+                                            with st.expander(
+                                                f"🌐 Agent explored {len(trace_result.steps)} steps — {len(trace_result.final_elements.splitlines())} elements captured",
+                                                expanded=False,
+                                            ):
+                                                st.markdown(trace_result.navigation_path)
+                                                unique_els = trace_result.final_elements.splitlines()
+                                                if unique_els:
+                                                    st.caption("Elements captured:")
+                                                    for el in unique_els[:25]:
+                                                        st.caption(f"  • {el}")
 
-                from pipeline.bug_tracker import check_and_draft_bug, raise_bug
-
-                bug_desc = st.text_area(
-                    "Describe the bug",
-                    placeholder=(
-                        "e.g. Extra Cover toggle saves correctly but checkout still shows "
-                        "standard Parcel Post rates. Happens when the store has cubic weight "
-                        "rules enabled."
-                    ),
-                    height=120,
-                    key="bug_description",
-                )
-                col_bug1, col_bug2 = st.columns([3, 2])
-                with col_bug1:
-                    bug_feature = st.text_input(
-                        "Feature / page context",
-                        placeholder="e.g. Settings → Additional Services → Extra Cover",
-                        key="bug_feature_context",
-                    )
-                with col_bug2:
-                    bug_release = st.text_input(
-                        "Release",
-                        value=st.session_state.get("rqa_release", ""),
-                        key="bug_release_input",
-                    )
-
-                if st.button("🔍 Check Backlog & Draft Bug", key="check_bug_btn",
-                             type="primary", disabled=not bug_desc.strip()):
-                    with st.spinner("Formatting bug + checking Trello backlog for duplicates…"):
-                        bug_result = check_and_draft_bug(
-                            issue_description=bug_desc.strip(),
-                            feature_context=bug_feature.strip(),
-                            release=bug_release.strip(),
-                        )
-                    st.session_state["bug_check_result"] = bug_result
-                    st.rerun()
-
-                bug_result = st.session_state.get("bug_check_result")
-                if bug_result:
-                    if bug_result.error:
-                        st.error(f"❌ {bug_result.error}")
-
-                    elif bug_result.is_duplicate:
-                        # ── Duplicate found ──────────────────────────────
-                        dup = bug_result.duplicate_card
-                        st.warning(
-                            f"⚠️ This issue may already exist in the backlog.\n\n"
-                            f"**{bug_result.duplicate_reason}**"
-                        )
-                        st.markdown(f"**Existing card:** [{dup.name}]({dup.url})")
-                        if dup.desc:
-                            with st.expander("📋 View existing card description", expanded=False):
-                                st.markdown(dup.desc[:800])
-
-                        st.caption(
-                            "If this is a different issue, edit your description to be more "
-                            "specific and check again."
-                        )
-                        # Still allow raising as new if QA disagrees
-                        if st.button("➕ Raise Anyway (different issue)", key="raise_anyway_btn"):
-                            # Override is_duplicate so draft section renders below
-                            bug_result.is_duplicate = False
-                            st.session_state["bug_check_result"] = bug_result
-                            st.rerun()
-
-                    if not bug_result.is_duplicate:
-                        # ── New bug — show draft for approval ─────────────
-                        draft = bug_result.draft
-                        if draft:
-                            sev_colors = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "P4": "🟢"}
-                            sev_icon = sev_colors.get(draft.severity, "⚪")
-
-                            st.success("✅ No duplicate found — new bug ready for review")
-                            st.markdown("#### Bug Draft — Review before raising")
-                            st.markdown(draft.to_display_markdown())
-
-                            st.divider()
-                            st.caption(
-                                "Review the draft above. You can edit the title or severity "
-                                "before raising it in Trello."
-                            )
-
-                            col_title, col_sev = st.columns([4, 1])
-                            with col_title:
-                                edited_title = st.text_input(
-                                    "Bug title (editable)",
-                                    value=draft.title,
-                                    key="bug_edit_title",
-                                )
-                            with col_sev:
-                                edited_sev = st.selectbox(
-                                    "Severity",
-                                    ["P1", "P2", "P3", "P4"],
-                                    index=["P1", "P2", "P3", "P4"].index(draft.severity),
-                                    key="bug_edit_sev",
-                                )
-
-                            if st.button(
-                                "✅ Approve & Raise in Trello → Backlog",
-                                type="primary",
-                                key="raise_bug_btn",
-                                use_container_width=True,
-                            ):
-                                # Apply edits
-                                draft.title    = edited_title.strip() or draft.title
-                                draft.severity = edited_sev
-                                # Update labels to match edited severity
-                                draft.labels = [
-                                    lb for lb in draft.labels
-                                    if lb not in ["P1", "P2", "P3", "P4"]
-                                ] + [edited_sev]
-
-                                with st.spinner("Creating card in Trello Backlog…"):
+                                    # Detect app_path from POM registry for this card
+                                    chrome_app_path = ""
                                     try:
-                                        created_card = raise_bug(draft)
-                                        st.session_state["bug_raised_card"] = created_card
-                                        st.session_state.pop("bug_check_result", None)
+                                        from pipeline.automation_writer import find_pom
+                                        pom_entry = find_pom(card.name)
+                                        if pom_entry:
+                                            chrome_app_path = pom_entry.get("app_path", "")
+                                    except Exception:
+                                        pass
 
-                                        # ── Link backlog card back to the release card ──
-                                        try:
-                                            from pipeline.trello_client import TrelloClient as _TC
-                                            _TC().add_comment(
-                                                card.id,
-                                                f"🐛 Bug raised to Backlog: "
-                                                f"[{created_card.name}]({created_card.url})\n"
-                                                f"Severity: {draft.severity} · Release: {draft.release}",
+                                    col_explore, col_apppath = st.columns([2, 3])
+                                    with col_apppath:
+                                        chrome_app_path = st.text_input(
+                                            "App path (optional)",
+                                            value=chrome_app_path,
+                                            placeholder="e.g. settings/additional-services",
+                                            key=f"chrome_path_{card.id}",
+                                            label_visibility="collapsed",
+                                        )
+                                    with col_explore:
+                                        if st.button(
+                                            "🌐 Explore App",
+                                            key=f"explore_{card.id}",
+                                            use_container_width=True,
+                                            help="Opens Chrome, walks through the feature, captures real UI elements",
+                                        ):
+                                            from pipeline.chrome_agent import explore_with_agent
+                                            with st.spinner("🌐 Chrome Agent exploring the app… (takes ~30s)"):
+                                                trace = explore_with_agent(
+                                                    card_name=card.name,
+                                                    acceptance_criteria=card.desc or "",
+                                                    app_path=chrome_app_path,
+                                                    max_steps=12,
+                                                )
+                                            st.session_state[trace_key] = trace
+                                            st.rerun()
+
+                                # ── QA context for this card ──────────────────────
+                                qa_context_key = f"qa_ctx_{card.id}"
+                                qa_context = st.text_area(
+                                    "🧪 QA Test Context (optional)",
+                                    key=qa_context_key,
+                                    placeholder=(
+                                        "Tell the AI specific data to use, e.g.:\n"
+                                        "• Use HS code 123456 on product 'Test Shirt'\n"
+                                        "• Enable Dry Ice with weight 2.5 kg\n"
+                                        "• Use Australia Post Express Post service"
+                                    ),
+                                    height=90,
+                                    help="This context is passed to the AI so generated tests use the right product, settings, or values.",
+                                )
+
+                                # ── Auto-fix toggle ────────────────────────────────
+                                auto_fix_enabled = st.toggle(
+                                    "🔄 Auto-run & fix until passing",
+                                    key=f"auto_fix_{card.id}",
+                                    value=False,
+                                    help=(
+                                        "After writing code, automatically run the tests. "
+                                        "If they fail, Claude reads the errors and fixes the code, "
+                                        "then re-runs. Repeats up to 3 times."
+                                    ),
+                                )
+
+                                # ── Generate code button ───────────────────────────
+                                # Priority: Smart AC Verifier context > Chrome Agent trace
+                                _sav_ctx    = st.session_state.get(f"sav_context_{card.id}", "")
+                                trace_for_gen = st.session_state.get(f"chrome_trace_{card.id}") if use_chrome_agent else None
+                                chrome_context = (
+                                    _sav_ctx                          # Smart AC verified flows first
+                                    or (
+                                        trace_for_gen.to_context_string()
+                                        if trace_for_gen and not trace_for_gen.error
+                                        else ""
+                                    )
+                                )
+                                if st.button("⚙️ Write Automation Code", key=f"auto_{card.id}",
+                                             use_container_width=True,
+                                             type="primary"):
+                                    from pipeline.automation_writer import write_automation
+                                    label = (
+                                        "✍️ Generating tests from verified AC flows…"
+                                        if _sav_ctx
+                                        else "✍️ Generating tests from live app trace…"
+                                        if chrome_context
+                                        else "✍️ Claude is writing Playwright tests…"
+                                    )
+                                    fix_status_placeholder = st.empty()
+                                    def _on_fix_progress(iteration, status, output, _ph=fix_status_placeholder):
+                                        _ph.info(f"🔄 **Auto-fix iteration {iteration}/3** — {status}")
+                                    with st.spinner(label):
+                                        _tc_md = tc_store.get(card.id, "")
+                                        if not _tc_md:
+                                            # Session was reloaded — recover TCs from Trello comment
+                                            _tc_md = next(
+                                                (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                                                ""
                                             )
-                                        except Exception:
-                                            pass  # comment failure must not block
+                                        result = write_automation(
+                                            card_name=card.name,
+                                            test_cases_markdown=_tc_md,
+                                            acceptance_criteria=card.desc or "",
+                                            branch_name=auto_branch_input,
+                                            dry_run=dry_auto,
+                                            push=push_auto,
+                                            chrome_trace_context=chrome_context,
+                                            qa_context=qa_context.strip(),
+                                            auto_fix=auto_fix_enabled and not dry_auto,
+                                            fix_iterations=3,
+                                            on_fix_progress=_on_fix_progress,
+                                        )
+                                        # Record how many agent steps contributed
+                                        if chrome_context and trace_for_gen:
+                                            result["chrome_trace_steps"] = len(trace_for_gen.steps)
+                                    st.session_state[auto_key] = result
+                                    st.rerun()
 
-                                        # ── Store bug per release card for sheet export ──
-                                        _bugs_key = f"bugs_for_{card.id}"
-                                        _existing = st.session_state.get(_bugs_key, [])
-                                        _existing.append({
-                                            "name": created_card.name,
-                                            "url":  created_card.url or "",
-                                            "severity": draft.severity,
-                                        })
-                                        st.session_state[_bugs_key] = _existing
 
-                                    except Exception as exc:
-                                        st.error(f"❌ Failed to create card: {exc}")
-                                st.rerun()
+        with _write_subtabs[1]:
+            st.markdown(
+                '<div class="step-chip">✍️ Write Automation</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("## ✍️ Write Automation")
+            st.caption(
+                "Write test cases manually → Chrome Agent walks the live app → "
+                "generates POM + spec — no Trello card needed."
+            )
 
-                raised_card = st.session_state.get("bug_raised_card")
-                if raised_card:
-                    st.success(
-                        f"🐛 Bug raised in Trello! "
-                        f"[{raised_card.name}]({raised_card.url})"
+            if not api_ok:
+                st.error("❌ ANTHROPIC_API_KEY not set — add it to .env to use this feature")
+            else:
+                # ── Step 1: Feature Info ──────────────────────────────────────
+                _step_header("1", "Feature Details")
+
+                col_name, col_path = st.columns(2)
+                with col_name:
+                    ma_feature = st.text_input(
+                        "Feature name",
+                        placeholder="e.g. AU Post Extra Cover",
+                        key="ma_feature_name",
+                        help="Used as the card name for POM matching and code generation",
                     )
-                    if st.button("🆕 Report another bug", key="clear_bug_btn"):
-                        st.session_state.pop("bug_raised_card", None)
-                        st.session_state.pop("bug_check_result", None)
+                with col_path:
+                    ma_app_path = st.text_input(
+                        "App path (optional)",
+                        placeholder="e.g. settings/additional-services",
+                        key="ma_app_path",
+                        help="Sub-path in the AU Post app. Leave blank to start from the app root.",
+                    )
+
+                col_branch, col_dryrun = st.columns([3, 1])
+                with col_branch:
+                    ma_branch = st.text_input(
+                        "Branch name",
+                        value=f"automation/{re.sub(r'[^a-z0-9]+', '-', (ma_feature or 'manual').lower()).strip('-')[:40]}",
+                        key="ma_branch",
+                    )
+                with col_dryrun:
+                    st.write("")
+                    ma_dry = st.checkbox("Dry run", value=True, key="ma_dry",
+                                         help="Preview generated code without writing to disk")
+                    ma_push = st.checkbox("Push branch", value=False, key="ma_push")
+
+                st.divider()
+
+                # ── Step 2: Feature detection preview ────────────────────────
+                _step_header("2", "Feature Type Detection")
+
+                det_key = "ma_detection"
+                ma_det = st.session_state.get(det_key)
+
+                if ma_feature:
+                    if st.button("🔍 Detect New or Existing", key="ma_detect_btn"):
+                        from pipeline.feature_detector import detect_feature
+                        with st.spinner("Checking codebase for existing POM…"):
+                            ma_det = detect_feature(ma_feature, "")
+                        st.session_state[det_key] = ma_det
                         st.rerun()
 
-    # ── Tab 1: Move Cards ───────────────────────────────────────────────────
+                    if ma_det:
+                        kind_icon  = "🆕" if ma_det.kind == "new" else "✏️"
+                        kind_color = "#d1fae5" if ma_det.kind == "new" else "#e0e7ff"
+                        kind_text  = "#065f46" if ma_det.kind == "new" else "#3730a3"
+                        st.markdown(
+                            f'<div style="background:{kind_color};color:{kind_text};'
+                            f'border-radius:8px;padding:10px 16px;margin:8px 0;font-weight:600">'
+                            f'{kind_icon} {ma_det.kind.upper()} FEATURE — '
+                            f'{ma_det.confidence:.0%} confidence<br>'
+                            f'<span style="font-weight:400;font-size:0.85rem">{ma_det.reasoning[:200]}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        if ma_det.related_files:
+                            st.caption("Related files: " + " · ".join(
+                                f"`{f}`" for f in ma_det.related_files[:4]
+                            ))
+                else:
+                    st.caption("Enter a feature name above to detect new vs existing.")
+
+                st.divider()
+
+                # ── Step 3: Write Test Cases ──────────────────────────────────
+                _step_header("3", "Write Test Cases")
+                st.caption(
+                    "Type your manual test cases below — positive scenarios, "
+                    "edge cases, anything you want automated."
+                )
+
+                ma_tc = st.text_area(
+                    "Test cases",
+                    height=280,
+                    key="ma_test_cases",
+                    placeholder=(
+                        "### TC-1: Enable Hold at Location\n"
+                        "**Steps:**\n"
+                        "1. Go to Settings → Additional Services\n"
+                        "2. Enable 'Hold at Location' toggle\n"
+                        "3. Click Save\n"
+                        "**Expected:** Toast shows 'Updated'\n\n"
+                        "### TC-2: Verify toggle persists after reload\n"
+                        "**Steps:**\n"
+                        "1. Reload the page\n"
+                        "2. Check 'Hold at Location' toggle state\n"
+                        "**Expected:** Toggle remains enabled"
+                    ),
+                )
+
+                st.divider()
+
+                # ── Step 4: Chrome Agent ──────────────────────────────────────
+                _step_header("4", "Explore App with Chrome Agent (recommended)")
+                st.caption(
+                    "Agent navigates the live app, captures real UI elements at each step. "
+                    "Gives Claude grounded locators instead of guessed ones."
+                )
+
+                trace_key = "ma_chrome_trace"
+                ma_trace  = st.session_state.get(trace_key)
+
+                if ma_trace:
+                    if ma_trace.error:
+                        st.error(f"❌ Agent error: {ma_trace.error}")
+                    else:
+                        st.markdown(
+                            f'<div style="background:#d1fae5;color:#065f46;border-radius:8px;'
+                            f'padding:10px 16px;margin:8px 0;font-weight:600">'
+                            f'✅ Agent explored {len(ma_trace.steps)} steps · '
+                            f'{len(ma_trace.final_elements.splitlines())} UI elements captured'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        with st.expander("🌐 View agent navigation path", expanded=False):
+                            st.markdown(ma_trace.navigation_path or "(no steps)")
+                            elements = ma_trace.final_elements.splitlines()
+                            if elements:
+                                st.caption("Elements captured:")
+                                for el in elements[:30]:
+                                    st.caption(f"  • {el}")
+                                if len(elements) > 30:
+                                    st.caption(f"  …and {len(elements)-30} more")
+
+                col_exp, col_maxsteps = st.columns([2, 1])
+                with col_maxsteps:
+                    ma_max_steps = st.slider("Max steps", 4, 20, 12, key="ma_max_steps")
+                with col_exp:
+                    explore_disabled = not ma_feature.strip()
+                    if st.button(
+                        "🌐 Explore App Now",
+                        key="ma_explore_btn",
+                        use_container_width=True,
+                        disabled=explore_disabled,
+                        help="Opens Chrome, navigates the app, captures UI elements",
+                    ):
+                        from pipeline.chrome_agent import explore_with_agent
+                        with st.spinner(f"🌐 Chrome Agent exploring '{ma_feature}'… (up to {ma_max_steps} steps)"):
+                            ma_trace = explore_with_agent(
+                                card_name=ma_feature,
+                                acceptance_criteria=ma_tc or f"Explore the {ma_feature} feature",
+                                app_path=ma_app_path.strip(),
+                                max_steps=ma_max_steps,
+                            )
+                        st.session_state[trace_key] = ma_trace
+                        st.rerun()
+
+                st.divider()
+
+                # ── Step 5: Generate Automation ───────────────────────────────
+                _step_header("5", "Generate Playwright Automation")
+
+                chrome_ctx = (
+                    ma_trace.to_context_string()
+                    if ma_trace and not ma_trace.error
+                    else ""
+                )
+
+                if chrome_ctx:
+                    st.success(
+                        f"✅ Will use Chrome Agent trace "
+                        f"({len(ma_trace.steps)} steps) for grounded locator generation."
+                    )
+                else:
+                    st.info(
+                        "ℹ️ No agent trace — code will be generated from test cases + "
+                        "RAG knowledge base. Run Step 4 for grounded locators."
+                    )
+
+                ma_qa_context = st.text_area(
+                    "🧪 QA Test Context (optional)",
+                    key="ma_qa_context",
+                    placeholder=(
+                        "Tell the AI specific data to use, e.g.:\n"
+                        "• Use HS code 123456 on product 'Test Shirt'\n"
+                        "• Enable Dry Ice with weight 2.5 kg\n"
+                        "• Use Australia Post Express Post service"
+                    ),
+                    height=90,
+                    help="Specific product names, settings values or any test data the AI should use in the generated tests.",
+                )
+
+                gen_disabled = not ma_feature.strip() or not ma_tc.strip()
+                if gen_disabled:
+                    st.caption("⚠️ Enter feature name and test cases above to enable generation.")
+
+                ma_auto_fix = st.toggle(
+                    "🔄 Auto-run & fix until passing",
+                    key="ma_auto_fix",
+                    value=False,
+                    help=(
+                        "After writing code, automatically run the tests. "
+                        "If they fail, Claude reads the errors and fixes the code, "
+                        "then re-runs. Repeats up to 3 times."
+                    ),
+                )
+
+                if st.button(
+                    "⚙️ Generate Automation Code",
+                    key="ma_generate_btn",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=gen_disabled,
+                ):
+                    from pipeline.automation_writer import write_automation
+                    label = (
+                        "✍️ Generating from live app trace…"
+                        if chrome_ctx else
+                        "✍️ Claude is writing Playwright tests…"
+                    )
+                    ma_fix_ph = st.empty()
+                    def _ma_on_fix(iteration, status, output, _ph=ma_fix_ph):
+                        _ph.info(f"🔄 **Auto-fix iteration {iteration}/3** — {status}")
+                    with st.spinner(label):
+                        ma_result = write_automation(
+                            card_name=ma_feature,
+                            test_cases_markdown=ma_tc,
+                            acceptance_criteria=ma_tc,
+                            branch_name=ma_branch,
+                            dry_run=ma_dry,
+                            push=ma_push,
+                            chrome_trace_context=chrome_ctx,
+                            qa_context=ma_qa_context.strip(),
+                            auto_fix=ma_auto_fix and not ma_dry,
+                            fix_iterations=3,
+                            on_fix_progress=_ma_on_fix,
+                        )
+                    st.session_state["ma_result"] = ma_result
+                    st.rerun()
+
+                # ── Step 6: Results ───────────────────────────────────────────
+                ma_result = st.session_state.get("ma_result")
+                if ma_result:
+                    st.divider()
+                    _step_header("6", "Results")
+
+                    err = ma_result.get("error", "")
+                    if err:
+                        st.error(f"❌ Generation failed: {err}")
+                    else:
+                        kind       = ma_result.get("kind", "")
+                        files      = ma_result.get("files_written", [])
+                        branch     = ma_result.get("branch", "")
+                        pushed     = ma_result.get("pushed", False)
+                        agent_steps = ma_result.get("chrome_trace_steps", 0)
+
+                        kind_badge  = "🆕 New POM created" if kind == "new_pom" else "✏️ Existing POM updated"
+                        agent_badge = f" · 🌐 {agent_steps}-step agent trace" if agent_steps else ""
+
+                        st.markdown(
+                            f'<div style="background:#d1fae5;color:#065f46;border-radius:10px;'
+                            f'padding:14px 18px;margin:8px 0">'
+                            f'<div style="font-weight:700;font-size:1rem">'
+                            f'✅ {kind_badge}{agent_badge}</div>'
+                            f'<div style="margin-top:6px;font-size:0.85rem">'
+                            f'{len(files)} file(s) written</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                        # Files written
+                        if files:
+                            st.markdown("**Files:**")
+                            for f in files:
+                                icon = "📋" if f.endswith(".spec.ts") else "📄"
+                                st.code(f"{icon}  {f}", language=None)
+
+                        # Auto-fix results
+                        fix_history = ma_result.get("fix_history", [])
+                        if fix_history:
+                            fix_passed = ma_result.get("fix_passed", False)
+                            fix_iters  = ma_result.get("fix_iterations", 0)
+                            if fix_passed:
+                                st.success(f"✅ Tests passing after {fix_iters} run(s)")
+                            else:
+                                st.error(
+                                    f"❌ Tests still failing after {fix_iters} auto-fix attempt(s) — "
+                                    f"push blocked. Fix locally and push manually."
+                                )
+                            with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
+                                for run in fix_history:
+                                    icon = "✅" if run["passed"] else "❌"
+                                    st.markdown(f"**{icon} Iteration {run['iteration']}**")
+                                    if run.get("fixed_files"):
+                                        st.caption("Fixed: " + ", ".join(f"`{x}`" for x in run["fixed_files"]))
+                                    with st.expander(f"Output (iter {run['iteration']})", expanded=False):
+                                        st.code(run.get("output", "")[-2000:], language="text")
+
+                        # Branch
+                        ma_push_err = ma_result.get("push_error", "")
+                        if branch:
+                            col_b, col_push = st.columns([3, 1])
+                            with col_b:
+                                st.info(f"🌿 Branch: `{branch}`")
+                                if ma_push_err and "skipped" in ma_push_err.lower():
+                                    st.warning(f"⚠️ {ma_push_err}")
+                            with col_push:
+                                if not pushed:
+                                    if st.button("🚀 Push to origin", key="ma_push_btn"):
+                                        from pipeline.automation_writer import _push_branch
+                                        ok, out = _push_branch(branch)
+                                        if ok:
+                                            st.success(f"✅ Pushed `{branch}`!")
+                                            ma_result["pushed"] = True
+                                            st.session_state["ma_result"] = ma_result
+                                        else:
+                                            st.error(f"Push failed: {out}")
+                                else:
+                                    st.success("✅ Pushed")
+
+                        # Preview generated files
+                        spec_file = ma_result.get("spec_file", "")
+                        pom_file  = ma_result.get("pom_file", "")
+                        if spec_file or pom_file:
+                            from pathlib import Path as _Path
+                            import config as _cfg
+                            codebase = _Path(_cfg.AUTOMATION_CODEBASE_PATH)
+                            for fpath, label in [(spec_file, "Spec"), (pom_file, "POM")]:
+                                if fpath:
+                                    full = codebase / fpath
+                                    if full.exists():
+                                        with st.expander(f"👁 Preview {label}: `{fpath}`", expanded=False):
+                                            st.code(full.read_text(encoding="utf-8"), language="typescript")
+
+                        # Update RAG
+                        rag_key = "ma_rag_done"
+                        if not st.session_state.get(rag_key):
+                            try:
+                                from pipeline.rag_updater import update_rag_from_card
+                                with st.spinner("📚 Updating knowledge base…"):
+                                    rag_res = update_rag_from_card(
+                                        card_id=f"manual_{re.sub(r'[^a-z0-9]', '', ma_feature.lower())}",
+                                        card_name=ma_feature,
+                                        description=ma_tc,
+                                        acceptance_criteria=ma_tc,
+                                        test_cases=ma_tc,
+                                        release="manual",
+                                    )
+                                st.session_state[rag_key] = True
+                                st.caption(f"📚 Knowledge base updated ({rag_res.get('chunks_added', 0)} chunks)")
+                            except Exception as rag_exc:
+                                st.caption(f"⚠️ RAG update skipped: {rag_exc}")
+
+                        # Reset button
+                        st.divider()
+                        if st.button("🔄 Start New", key="ma_reset_btn"):
+                            for k in ["ma_result", "ma_chrome_trace", "ma_detection", "ma_rag_done"]:
+                                st.session_state.pop(k, None)
+                            st.rerun()
+
+
+    # ═══ Tab: Generate Documents ══════════════════════════════════════════
+    with tab_gen_docs:
+        if not cards:
+            _render_release_setup()
+            st.stop()
+
+        # Refresh local refs from session_state
+        cards = st.session_state.get("rqa_cards", [])
+        tc_store = st.session_state.setdefault("rqa_test_cases", {})
+        approved_store = st.session_state.setdefault("rqa_approved", {})
+        current_release = st.session_state.get("rqa_release", "")
+        if not cards:
+            st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
+            st.stop()
+
+        from pipeline.trello_client import TrelloClient
+        from pipeline.card_processor import (
+            generate_test_cases, regenerate_with_feedback, write_test_cases_to_card
+        )
+        from pipeline.sheets_writer import (
+            append_to_sheet, detect_tab, SHEET_TABS,
+            check_duplicates, parse_test_cases_to_rows,
+        )
+        from pipeline.domain_validator import validate_card, ValidationReport
+        from pathlib import Path
+        sheets_ready = sheets_ok
+
+        for card in cards:
+            is_approved = approved_store.get(card.id, False)
+            vr: ValidationReport | None = st.session_state.get(f"validation_{card.id}")
+
+            # ── Detect if already processed (AC in desc, TCs in comments) ──
+            existing_tc_comment = next(
+                (c for c in (card.comments or []) if "📋 **QA Test Cases" in c),
+                None,
+            )
+            has_existing_ac = bool(card.desc and len(card.desc.strip()) > 30)
+            has_existing_tc = bool(existing_tc_comment)
+            already_done    = has_existing_ac and has_existing_tc
+
+            # Expander icon shows validation + approval status
+            val_icon  = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                vr.overall_status if vr else "", "⚪"
+            )
+            appr_icon = "✅ " if is_approved else ""
+            done_badge = "⚡ " if already_done and not is_approved else ""
+            with st.expander(f"{appr_icon}{done_badge}{val_icon} {card.name}", expanded=False):
+                # ── Already processed banner ──────────────────────
+                if already_done and not is_approved:
+                    st.info(
+                        "⚡ **This card was already processed** — AC is in the description "
+                        "and test cases exist in a Trello comment."
+                    )
+                    col_proc1, col_proc2, col_proc3 = st.columns(3)
+                    with col_proc1:
+                        if st.button(
+                            "➡️ Proceed to Automation",
+                            key=f"proceed_{card.id}",
+                            use_container_width=True,
+                            type="primary",
+                            help="Skip AC + TC generation — use existing and go straight to writing automation",
+                        ):
+                            # Pre-fill TC session state from existing Trello comment
+                            tc_store[card.id] = existing_tc_comment
+                            approved_store[card.id] = True
+                            st.session_state[f"ac_saved_{card.id}"] = True
+                            st.rerun()
+                    with col_proc2:
+                        if st.button(
+                            "📋 View existing TCs",
+                            key=f"view_tc_{card.id}",
+                            use_container_width=True,
+                        ):
+                            st.session_state[f"show_existing_tc_{card.id}"] = True
+                    with col_proc3:
+                        if st.button(
+                            "🔄 Regenerate",
+                            key=f"banner_regen_{card.id}",
+                            use_container_width=True,
+                            help="Start fresh — will add new rows to Trello + Sheet",
+                        ):
+                            st.session_state[f"force_regen_{card.id}"] = True
+
+                    if st.session_state.get(f"show_existing_tc_{card.id}"):
+                        with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
+                            st.markdown(existing_tc_comment)
+                            if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                                del st.session_state[f"show_existing_tc_{card.id}"]
+                                st.rerun()
+
+                # For already-processed cards: skip AC/TC steps, show only SAV
+                _processed_only = (already_done and not is_approved
+                        and not st.session_state.get(f"force_regen_{card.id}", False))
+
+
+                # ── STEP 2d: Generate Documents ───────────────────
+                _step_header("2d", "Generate Documents")
+                st.caption(
+                    "Generate a polished PDF from this card's Trello data. "
+                    "Claude reads the description and AC to build the document content automatically."
+                )
+
+                _doc_col1, _doc_col2 = st.columns(2)
+
+                # ── Business Pitch ────────────────────────────────
+                with _doc_col1:
+                    _biz_key = f"biz_pitch_{card.id}"
+                    _biz_path = st.session_state.get(_biz_key)
+
+                    if _biz_path and Path(_biz_path).exists():
+                        st.success("✅ Business Pitch ready")
+                        with open(_biz_path, "rb") as _bf:
+                            st.download_button(
+                                "⬇️ Download Business Pitch PDF",
+                                data=_bf.read(),
+                                file_name=Path(_biz_path).name,
+                                mime="application/pdf",
+                                key=f"dl_biz_{card.id}",
+                                use_container_width=True,
+                            )
+                        st.caption(f"📁 `{_biz_path}`")
+                        if st.button("🔁 Regenerate", key=f"regen_biz_{card.id}",
+                                     use_container_width=True):
+                            del st.session_state[_biz_key]
+                            st.rerun()
+                    else:
+                        if st.button(
+                            "📄 Generate Business Document",
+                            key=f"gen_biz_{card.id}",
+                            use_container_width=True,
+                            help="Business pitch PDF — merchant scenarios, benefits, problem statement",
+                        ):
+                            try:
+                                from pipeline.generate_business_pitch import generate_business_pitch as _gen_biz
+                                with st.spinner("✍️ Claude is writing the Business Pitch… (~15–20s)"):
+                                    _biz_out = _gen_biz(
+                                        card_name=card.name,
+                                        card_desc=card.desc or "",
+                                        card_id=card.id,
+                                        card_url=card.url or "",
+                                    )
+                                st.session_state[_biz_key] = _biz_out
+                                st.rerun()
+                            except Exception as _ex:
+                                st.error(f"❌ Business Pitch failed: {_ex}")
+
+                # ── Detailed Report ───────────────────────────────
+                with _doc_col2:
+                    _det_key = f"det_report_{card.id}"
+                    _det_path = st.session_state.get(_det_key)
+
+                    if _det_path and Path(_det_path).exists():
+                        _sav_note = " (with SAV results)" if st.session_state.get(f"sav_report_{card.id}") else ""
+                        st.success(f"✅ Detailed Report ready{_sav_note}")
+                        with open(_det_path, "rb") as _df:
+                            st.download_button(
+                                "⬇️ Download Detailed Report PDF",
+                                data=_df.read(),
+                                file_name=Path(_det_path).name,
+                                mime="application/pdf",
+                                key=f"dl_det_{card.id}",
+                                use_container_width=True,
+                            )
+                        st.caption(f"📁 `{_det_path}`")
+                        if st.button("🔁 Regenerate", key=f"regen_det_{card.id}",
+                                     use_container_width=True):
+                            del st.session_state[_det_key]
+                            st.rerun()
+                    else:
+                        if st.button(
+                            "📊 Generate Detailed Report",
+                            key=f"gen_det_{card.id}",
+                            use_container_width=True,
+                            help="Full QA report — training guide, all test cases, AC sign-off, QA notes",
+                        ):
+                            try:
+                                from pipeline.generate_detailed_report import generate_detailed_report as _gen_det
+                                with st.spinner("✍️ Claude is writing the Detailed Report… (~20–25s)"):
+                                    _det_out = _gen_det(
+                                        card_name=card.name,
+                                        card_desc=card.desc or "",
+                                        card_id=card.id,
+                                        card_url=card.url or "",
+                                        sav_report=st.session_state.get(f"sav_report_{card.id}"),
+                                    )
+                                st.session_state[_det_key] = _det_out
+                                st.rerun()
+                            except Exception as _ex:
+                                st.error(f"❌ Detailed Report failed: {_ex}")
+
+                st.divider()
+
+
+    # ── Tab: Move Cards ─────────────────────────────────────────────────────
     with tab_devdone:
         st.markdown("## 🔀 Move Cards")
         st.caption("Pick any board list, load its cards, select them, and move to any other list — just like Trello.")
@@ -3622,36 +4956,7 @@ def main():
             elif "dd_cards" in st.session_state:
                 st.info("No cards in this list.")
 
-    # ── Tab: History ────────────────────────────────────────────────────────
-    with tab_history:
-        st.markdown("## 📋 Pipeline Run History")
-        st.caption("Cards approved this session — cleared when the app restarts.")
-
-        runs = st.session_state.pipeline_runs
-        if not runs:
-            st.info("No cards approved yet this session. Approve a card in 🚀 Release QA to see history here.")
-        else:
-            st.markdown(f"**{len(runs)} card(s) approved this session**")
-            if st.button("🗑️ Clear history", key="clear_history"):
-                st.session_state.pipeline_runs = {}
-                _save_history({})
-                st.rerun()
-            st.divider()
-            for card_id, run in runs.items():
-                label = f"✅ {run.get('card_name', card_id)}  ·  {run.get('release', '')}  ·  {run.get('approved_at', '')}"
-                with st.expander(label, expanded=False):
-                    col_h1, col_h2, col_h3 = st.columns(3)
-                    col_h1.metric("📚 RAG chunks", run.get("rag_chunks", 0))
-                    col_h2.markdown(f"**Release**  \n{run.get('release', '—')}")
-                    col_h3.markdown(f"**Approved at**  \n{run.get('approved_at', '—')}")
-                    if run.get("card_url"):
-                        st.markdown(f"🔗 [Open in Trello]({run['card_url']})")
-                    tc_preview = run.get("test_cases", "")
-                    if tc_preview:
-                        with st.expander("📝 Test cases preview", expanded=False):
-                            st.markdown(tc_preview)
-
-    # ── Tab 3: Sign Off ─────────────────────────────────────────────────────
+    # ── Tab: Sign Off ───────────────────────────────────────────────────────
     with tab_signoff:
         st.markdown(
             '<div class="step-chip">⑧ QA Sign Off</div>',
@@ -3946,378 +5251,7 @@ def main():
                         st.markdown(f"[🔗 Open Sheet]({sheet_res['sheet_url']})")
 
 
-    # ── Tab: Manual Automation ──────────────────────────────────────────────
-    with tab_manual:
-        st.markdown(
-            '<div class="step-chip">✍️ Write Automation</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown("## ✍️ Write Automation")
-        st.caption(
-            "Write test cases manually → Chrome Agent walks the live app → "
-            "generates POM + spec — no Trello card needed."
-        )
-
-        if not api_ok:
-            st.error("❌ ANTHROPIC_API_KEY not set — add it to .env to use this feature")
-        else:
-            # ── Step 1: Feature Info ──────────────────────────────────────
-            _step_header("1", "Feature Details")
-
-            col_name, col_path = st.columns(2)
-            with col_name:
-                ma_feature = st.text_input(
-                    "Feature name",
-                    placeholder="e.g. AU Post Extra Cover",
-                    key="ma_feature_name",
-                    help="Used as the card name for POM matching and code generation",
-                )
-            with col_path:
-                ma_app_path = st.text_input(
-                    "App path (optional)",
-                    placeholder="e.g. settings/additional-services",
-                    key="ma_app_path",
-                    help="Sub-path in the AU Post app. Leave blank to start from the app root.",
-                )
-
-            col_branch, col_dryrun = st.columns([3, 1])
-            with col_branch:
-                ma_branch = st.text_input(
-                    "Branch name",
-                    value=f"automation/{re.sub(r'[^a-z0-9]+', '-', (ma_feature or 'manual').lower()).strip('-')[:40]}",
-                    key="ma_branch",
-                )
-            with col_dryrun:
-                st.write("")
-                ma_dry = st.checkbox("Dry run", value=True, key="ma_dry",
-                                     help="Preview generated code without writing to disk")
-                ma_push = st.checkbox("Push branch", value=False, key="ma_push")
-
-            st.divider()
-
-            # ── Step 2: Feature detection preview ────────────────────────
-            _step_header("2", "Feature Type Detection")
-
-            det_key = "ma_detection"
-            ma_det = st.session_state.get(det_key)
-
-            if ma_feature:
-                if st.button("🔍 Detect New or Existing", key="ma_detect_btn"):
-                    from pipeline.feature_detector import detect_feature
-                    with st.spinner("Checking codebase for existing POM…"):
-                        ma_det = detect_feature(ma_feature, "")
-                    st.session_state[det_key] = ma_det
-                    st.rerun()
-
-                if ma_det:
-                    kind_icon  = "🆕" if ma_det.kind == "new" else "✏️"
-                    kind_color = "#d1fae5" if ma_det.kind == "new" else "#e0e7ff"
-                    kind_text  = "#065f46" if ma_det.kind == "new" else "#3730a3"
-                    st.markdown(
-                        f'<div style="background:{kind_color};color:{kind_text};'
-                        f'border-radius:8px;padding:10px 16px;margin:8px 0;font-weight:600">'
-                        f'{kind_icon} {ma_det.kind.upper()} FEATURE — '
-                        f'{ma_det.confidence:.0%} confidence<br>'
-                        f'<span style="font-weight:400;font-size:0.85rem">{ma_det.reasoning[:200]}</span>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-                    if ma_det.related_files:
-                        st.caption("Related files: " + " · ".join(
-                            f"`{f}`" for f in ma_det.related_files[:4]
-                        ))
-            else:
-                st.caption("Enter a feature name above to detect new vs existing.")
-
-            st.divider()
-
-            # ── Step 3: Write Test Cases ──────────────────────────────────
-            _step_header("3", "Write Test Cases")
-            st.caption(
-                "Type your manual test cases below — positive scenarios, "
-                "edge cases, anything you want automated."
-            )
-
-            ma_tc = st.text_area(
-                "Test cases",
-                height=280,
-                key="ma_test_cases",
-                placeholder=(
-                    "### TC-1: Enable Hold at Location\n"
-                    "**Steps:**\n"
-                    "1. Go to Settings → Additional Services\n"
-                    "2. Enable 'Hold at Location' toggle\n"
-                    "3. Click Save\n"
-                    "**Expected:** Toast shows 'Updated'\n\n"
-                    "### TC-2: Verify toggle persists after reload\n"
-                    "**Steps:**\n"
-                    "1. Reload the page\n"
-                    "2. Check 'Hold at Location' toggle state\n"
-                    "**Expected:** Toggle remains enabled"
-                ),
-            )
-
-            st.divider()
-
-            # ── Step 4: Chrome Agent ──────────────────────────────────────
-            _step_header("4", "Explore App with Chrome Agent (recommended)")
-            st.caption(
-                "Agent navigates the live app, captures real UI elements at each step. "
-                "Gives Claude grounded locators instead of guessed ones."
-            )
-
-            trace_key = "ma_chrome_trace"
-            ma_trace  = st.session_state.get(trace_key)
-
-            if ma_trace:
-                if ma_trace.error:
-                    st.error(f"❌ Agent error: {ma_trace.error}")
-                else:
-                    st.markdown(
-                        f'<div style="background:#d1fae5;color:#065f46;border-radius:8px;'
-                        f'padding:10px 16px;margin:8px 0;font-weight:600">'
-                        f'✅ Agent explored {len(ma_trace.steps)} steps · '
-                        f'{len(ma_trace.final_elements.splitlines())} UI elements captured'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-                    with st.expander("🌐 View agent navigation path", expanded=False):
-                        st.markdown(ma_trace.navigation_path or "(no steps)")
-                        elements = ma_trace.final_elements.splitlines()
-                        if elements:
-                            st.caption("Elements captured:")
-                            for el in elements[:30]:
-                                st.caption(f"  • {el}")
-                            if len(elements) > 30:
-                                st.caption(f"  …and {len(elements)-30} more")
-
-            col_exp, col_maxsteps = st.columns([2, 1])
-            with col_maxsteps:
-                ma_max_steps = st.slider("Max steps", 4, 20, 12, key="ma_max_steps")
-            with col_exp:
-                explore_disabled = not ma_feature.strip()
-                if st.button(
-                    "🌐 Explore App Now",
-                    key="ma_explore_btn",
-                    use_container_width=True,
-                    disabled=explore_disabled,
-                    help="Opens Chrome, navigates the app, captures UI elements",
-                ):
-                    from pipeline.chrome_agent import explore_with_agent
-                    with st.spinner(f"🌐 Chrome Agent exploring '{ma_feature}'… (up to {ma_max_steps} steps)"):
-                        ma_trace = explore_with_agent(
-                            card_name=ma_feature,
-                            acceptance_criteria=ma_tc or f"Explore the {ma_feature} feature",
-                            app_path=ma_app_path.strip(),
-                            max_steps=ma_max_steps,
-                        )
-                    st.session_state[trace_key] = ma_trace
-                    st.rerun()
-
-            st.divider()
-
-            # ── Step 5: Generate Automation ───────────────────────────────
-            _step_header("5", "Generate Playwright Automation")
-
-            chrome_ctx = (
-                ma_trace.to_context_string()
-                if ma_trace and not ma_trace.error
-                else ""
-            )
-
-            if chrome_ctx:
-                st.success(
-                    f"✅ Will use Chrome Agent trace "
-                    f"({len(ma_trace.steps)} steps) for grounded locator generation."
-                )
-            else:
-                st.info(
-                    "ℹ️ No agent trace — code will be generated from test cases + "
-                    "RAG knowledge base. Run Step 4 for grounded locators."
-                )
-
-            ma_qa_context = st.text_area(
-                "🧪 QA Test Context (optional)",
-                key="ma_qa_context",
-                placeholder=(
-                    "Tell the AI specific data to use, e.g.:\n"
-                    "• Use HS code 123456 on product 'Test Shirt'\n"
-                    "• Enable Dry Ice with weight 2.5 kg\n"
-                    "• Use Australia Post Express Post service"
-                ),
-                height=90,
-                help="Specific product names, settings values or any test data the AI should use in the generated tests.",
-            )
-
-            gen_disabled = not ma_feature.strip() or not ma_tc.strip()
-            if gen_disabled:
-                st.caption("⚠️ Enter feature name and test cases above to enable generation.")
-
-            ma_auto_fix = st.toggle(
-                "🔄 Auto-run & fix until passing",
-                key="ma_auto_fix",
-                value=False,
-                help=(
-                    "After writing code, automatically run the tests. "
-                    "If they fail, Claude reads the errors and fixes the code, "
-                    "then re-runs. Repeats up to 3 times."
-                ),
-            )
-
-            if st.button(
-                "⚙️ Generate Automation Code",
-                key="ma_generate_btn",
-                type="primary",
-                use_container_width=True,
-                disabled=gen_disabled,
-            ):
-                from pipeline.automation_writer import write_automation
-                label = (
-                    "✍️ Generating from live app trace…"
-                    if chrome_ctx else
-                    "✍️ Claude is writing Playwright tests…"
-                )
-                ma_fix_ph = st.empty()
-                def _ma_on_fix(iteration, status, output, _ph=ma_fix_ph):
-                    _ph.info(f"🔄 **Auto-fix iteration {iteration}/3** — {status}")
-                with st.spinner(label):
-                    ma_result = write_automation(
-                        card_name=ma_feature,
-                        test_cases_markdown=ma_tc,
-                        acceptance_criteria=ma_tc,
-                        branch_name=ma_branch,
-                        dry_run=ma_dry,
-                        push=ma_push,
-                        chrome_trace_context=chrome_ctx,
-                        qa_context=ma_qa_context.strip(),
-                        auto_fix=ma_auto_fix and not ma_dry,
-                        fix_iterations=3,
-                        on_fix_progress=_ma_on_fix,
-                    )
-                st.session_state["ma_result"] = ma_result
-                st.rerun()
-
-            # ── Step 6: Results ───────────────────────────────────────────
-            ma_result = st.session_state.get("ma_result")
-            if ma_result:
-                st.divider()
-                _step_header("6", "Results")
-
-                err = ma_result.get("error", "")
-                if err:
-                    st.error(f"❌ Generation failed: {err}")
-                else:
-                    kind       = ma_result.get("kind", "")
-                    files      = ma_result.get("files_written", [])
-                    branch     = ma_result.get("branch", "")
-                    pushed     = ma_result.get("pushed", False)
-                    agent_steps = ma_result.get("chrome_trace_steps", 0)
-
-                    kind_badge  = "🆕 New POM created" if kind == "new_pom" else "✏️ Existing POM updated"
-                    agent_badge = f" · 🌐 {agent_steps}-step agent trace" if agent_steps else ""
-
-                    st.markdown(
-                        f'<div style="background:#d1fae5;color:#065f46;border-radius:10px;'
-                        f'padding:14px 18px;margin:8px 0">'
-                        f'<div style="font-weight:700;font-size:1rem">'
-                        f'✅ {kind_badge}{agent_badge}</div>'
-                        f'<div style="margin-top:6px;font-size:0.85rem">'
-                        f'{len(files)} file(s) written</div>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    # Files written
-                    if files:
-                        st.markdown("**Files:**")
-                        for f in files:
-                            icon = "📋" if f.endswith(".spec.ts") else "📄"
-                            st.code(f"{icon}  {f}", language=None)
-
-                    # Auto-fix results
-                    fix_history = ma_result.get("fix_history", [])
-                    if fix_history:
-                        fix_passed = ma_result.get("fix_passed", False)
-                        fix_iters  = ma_result.get("fix_iterations", 0)
-                        if fix_passed:
-                            st.success(f"✅ Tests passing after {fix_iters} run(s)")
-                        else:
-                            st.error(
-                                f"❌ Tests still failing after {fix_iters} auto-fix attempt(s) — "
-                                f"push blocked. Fix locally and push manually."
-                            )
-                        with st.expander("🔍 Auto-fix run history", expanded=not fix_passed):
-                            for run in fix_history:
-                                icon = "✅" if run["passed"] else "❌"
-                                st.markdown(f"**{icon} Iteration {run['iteration']}**")
-                                if run.get("fixed_files"):
-                                    st.caption("Fixed: " + ", ".join(f"`{x}`" for x in run["fixed_files"]))
-                                with st.expander(f"Output (iter {run['iteration']})", expanded=False):
-                                    st.code(run.get("output", "")[-2000:], language="text")
-
-                    # Branch
-                    ma_push_err = ma_result.get("push_error", "")
-                    if branch:
-                        col_b, col_push = st.columns([3, 1])
-                        with col_b:
-                            st.info(f"🌿 Branch: `{branch}`")
-                            if ma_push_err and "skipped" in ma_push_err.lower():
-                                st.warning(f"⚠️ {ma_push_err}")
-                        with col_push:
-                            if not pushed:
-                                if st.button("🚀 Push to origin", key="ma_push_btn"):
-                                    from pipeline.automation_writer import _push_branch
-                                    ok, out = _push_branch(branch)
-                                    if ok:
-                                        st.success(f"✅ Pushed `{branch}`!")
-                                        ma_result["pushed"] = True
-                                        st.session_state["ma_result"] = ma_result
-                                    else:
-                                        st.error(f"Push failed: {out}")
-                            else:
-                                st.success("✅ Pushed")
-
-                    # Preview generated files
-                    spec_file = ma_result.get("spec_file", "")
-                    pom_file  = ma_result.get("pom_file", "")
-                    if spec_file or pom_file:
-                        from pathlib import Path as _Path
-                        import config as _cfg
-                        codebase = _Path(_cfg.AUTOMATION_CODEBASE_PATH)
-                        for fpath, label in [(spec_file, "Spec"), (pom_file, "POM")]:
-                            if fpath:
-                                full = codebase / fpath
-                                if full.exists():
-                                    with st.expander(f"👁 Preview {label}: `{fpath}`", expanded=False):
-                                        st.code(full.read_text(encoding="utf-8"), language="typescript")
-
-                    # Update RAG
-                    rag_key = "ma_rag_done"
-                    if not st.session_state.get(rag_key):
-                        try:
-                            from pipeline.rag_updater import update_rag_from_card
-                            with st.spinner("📚 Updating knowledge base…"):
-                                rag_res = update_rag_from_card(
-                                    card_id=f"manual_{re.sub(r'[^a-z0-9]', '', ma_feature.lower())}",
-                                    card_name=ma_feature,
-                                    description=ma_tc,
-                                    acceptance_criteria=ma_tc,
-                                    test_cases=ma_tc,
-                                    release="manual",
-                                )
-                            st.session_state[rag_key] = True
-                            st.caption(f"📚 Knowledge base updated ({rag_res.get('chunks_added', 0)} chunks)")
-                        except Exception as rag_exc:
-                            st.caption(f"⚠️ RAG update skipped: {rag_exc}")
-
-                    # Reset button
-                    st.divider()
-                    if st.button("🔄 Start New", key="ma_reset_btn"):
-                        for k in ["ma_result", "ma_chrome_trace", "ma_detection", "ma_rag_done"]:
-                            st.session_state.pop(k, None)
-                        st.rerun()
-
-    # ── Tab 5: User Story Writer ─────────────────────────────────────────────
+    # ── Tab: User Story ──────────────────────────────────────────────────────
     with tab_us:
         st.markdown("### 📝 User Story Writer")
         st.caption("Describe what you need — AI will generate a User Story + Acceptance Criteria using the codebase and domain knowledge.")
@@ -4470,8 +5404,8 @@ def main():
                                 st.error(f"Failed to create card: {e}")
 
 
-    # ── Tab 6: Run Automation ────────────────────────────────────────────────
-    with tab_run:
+    # ── Tab: Run Automation ──────────────────────────────────────────────────
+    with tab_run_automation:
         import subprocess as _sp
         import glob as _glob
 
