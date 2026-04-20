@@ -1044,53 +1044,97 @@ def main():
 
 
         from pipeline.trello_client import TrelloClient
+        from pipeline.domain_validator import validate_card, ValidationReport
         from pathlib import Path
 
         st.divider()
         for card in cards:
-            ac_suggest_key = f"ac_suggestion_{card.id}"
-            ac_saved_key   = f"vac_ac_saved_{card.id}"
-            ac_suggestion  = st.session_state.get(ac_suggest_key)
-            ac_saved       = st.session_state.get(ac_saved_key, False)
+            _vac_key    = f"vac_report_{card.id}"       # ValidationReport
+            _vac_saved  = f"vac_ac_saved_{card.id}"     # written to Trello
+            vac_report: ValidationReport | None = st.session_state.get(_vac_key)
+            ac_saved    = st.session_state.get(_vac_saved, False)
+
+            # Derive the AC text to save (use current card.desc — it's the source of truth)
+            _ac_text = card.desc or ""
 
             with st.expander(f"📋 {card.name}", expanded=not ac_saved):
-                # ── Show existing AC from Trello if no generated one yet ──
-                if not ac_suggestion and card.desc and len(card.desc.strip()) > 30:
-                    st.markdown("**Current Acceptance Criteria (from Trello)**")
-                    st.markdown(card.desc[:800] + ("…" if len(card.desc) > 800 else ""))
-                    st.divider()
 
-                # ── Generate button ────────────────────────────────────────
-                if not ac_suggestion:
+                # ── Show current AC ────────────────────────────────────────
+                if _ac_text.strip():
+                    st.markdown("**Current Acceptance Criteria**")
+                    st.markdown(_ac_text[:1000] + ("…" if len(_ac_text) > 1000 else ""))
+                else:
+                    st.caption("_(No acceptance criteria found on this card)_")
+
+                st.divider()
+
+                # ── Validate button ────────────────────────────────────────
+                if not vac_report:
                     if st.button(
                         "✅ Validate Acceptance Criteria",
                         key=f"vac_gen_ac_{card.id}",
                         type="primary",
                         use_container_width=True,
+                        disabled=not bool(_ac_text.strip()),
+                        help="Cross-check AC against domain knowledge and find missing pieces",
                     ):
-                        from pipeline.card_processor import generate_acceptance_criteria
-                        raw = f"{card.name}\n\n{card.desc or ''}".strip()
-                        with st.spinner("Claude is generating Acceptance Criteria…"):
-                            st.session_state[ac_suggest_key] = generate_acceptance_criteria(
-                                raw,
-                                attachments=card.attachments,
-                                checklists=card.checklists,
+                        with st.spinner("Claude is reviewing the Acceptance Criteria…"):
+                            st.session_state[_vac_key] = validate_card(
+                                card_name=card.name,
+                                card_desc=_ac_text,
+                                acceptance_criteria=_ac_text,
                             )
                         st.rerun()
                 else:
-                    # ── Show generated AC ──────────────────────────────────
-                    if ac_saved:
-                        st.success("✅ Acceptance Criteria saved to Trello")
-                    else:
-                        st.markdown(ac_suggestion)
+                    # ── Validation result ──────────────────────────────────
+                    _status_icon = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                        vac_report.overall_status, "⚪"
+                    )
+                    st.markdown(f"{_status_icon} **{vac_report.overall_status}** — {vac_report.summary}")
 
-                    # ── Action buttons ─────────────────────────────────────
+                    # Missing pieces & suggestions
+                    _has_issues = any([
+                        vac_report.requirement_gaps,
+                        vac_report.ac_gaps,
+                        vac_report.accuracy_issues,
+                        vac_report.suggestions,
+                    ])
+                    if _has_issues:
+                        _vc1, _vc2 = st.columns(2)
+                        with _vc1:
+                            if vac_report.accuracy_issues:
+                                st.error("**❌ Accuracy Issues**")
+                                for _i in vac_report.accuracy_issues:
+                                    st.markdown(f"- {_i}")
+                            if vac_report.requirement_gaps:
+                                st.warning("**⚠️ Missing Requirements**")
+                                for _g in vac_report.requirement_gaps:
+                                    st.markdown(f"- {_g}")
+                        with _vc2:
+                            if vac_report.ac_gaps:
+                                st.warning("**📋 Missing AC Scenarios**")
+                                for _g in vac_report.ac_gaps:
+                                    st.markdown(f"- {_g}")
+                            if vac_report.suggestions:
+                                st.info("**💡 Suggestions**")
+                                for _s in vac_report.suggestions:
+                                    st.markdown(f"- {_s}")
+                    else:
+                        st.success("✅ Acceptance Criteria looks complete — no gaps found.")
+
                     st.divider()
+
+                    # ── Accept & save buttons ──────────────────────────────
+                    if ac_saved:
+                        st.success("✅ Acceptance Criteria accepted and saved to Trello")
+                    else:
+                        st.caption("Review the findings above, then accept and save:")
+
                     btn_col1, btn_col2, btn_col3 = st.columns(3)
 
                     with btn_col1:
                         if st.button(
-                            "💾 Write to Trello Description",
+                            "💾 Accept & Write to Trello Description",
                             key=f"vac_save_desc_{card.id}",
                             use_container_width=True,
                             type="primary",
@@ -1098,22 +1142,28 @@ def main():
                             with st.spinner("Saving to Trello description…"):
                                 TrelloClient(
                                     board_id=st.session_state.get("selected_board_id") or None
-                                ).update_card_description(card.id, ac_suggestion)
-                                card.desc = ac_suggestion
-                            st.session_state[ac_saved_key] = True
+                                ).update_card_description(card.id, _ac_text)
+                                card.desc = _ac_text
+                            st.session_state[_vac_saved] = True
                             st.rerun()
 
                     with btn_col2:
                         if st.button(
-                            "📝 Write to Trello QA Notes",
+                            "📝 Accept & Write to Trello QA Notes",
                             key=f"vac_save_notes_{card.id}",
                             use_container_width=True,
                         ):
-                            with st.spinner("Adding QA notes comment to Trello…"):
+                            _notes = (
+                                f"📋 **QA Validation — {vac_report.overall_status}**\n\n"
+                                + (f"**Summary:** {vac_report.summary}\n\n" if vac_report.summary else "")
+                                + ("**Missing Scenarios:**\n" + "\n".join(f"- {g}" for g in vac_report.ac_gaps) + "\n\n" if vac_report.ac_gaps else "")
+                                + ("**Suggestions:**\n" + "\n".join(f"- {s}" for s in vac_report.suggestions) if vac_report.suggestions else "")
+                            ).strip()
+                            with st.spinner("Adding QA notes to Trello…"):
                                 TrelloClient(
                                     board_id=st.session_state.get("selected_board_id") or None
-                                ).add_comment(card.id, f"📋 **QA Acceptance Criteria**\n\n{ac_suggestion}")
-                            st.success("✅ AC added as Trello QA Notes comment")
+                                ).add_comment(card.id, _notes)
+                            st.success("✅ QA validation notes added to Trello comment")
 
                     with btn_col3:
                         if st.button(
@@ -1126,10 +1176,9 @@ def main():
                     # ── Slack send panel ───────────────────────────────────
                     if st.session_state.get(f"vac_show_slack_{card.id}"):
                         from pipeline.slack_client import (
-                            dm_token_configured, list_slack_channels,
-                            post_content_to_slack_channel,
+                            list_slack_channels, post_content_to_slack_channel,
                         )
-                        st.markdown("##### 📢 Post to Slack Channel")
+                        st.markdown("##### 📢 Post Validation Report to Slack")
                         _ch_cache_key = "slack_channels_cache"
                         if _ch_cache_key not in st.session_state:
                             with st.spinner("Loading channels…"):
@@ -1140,7 +1189,6 @@ def main():
                             st.session_state[_ch_cache_key] = (_chs, _ch_note or "")
                         else:
                             _chs, _ch_note = st.session_state[_ch_cache_key]
-
                         if _ch_note:
                             st.caption(f"ℹ️ {_ch_note}")
                         if _chs:
@@ -1148,14 +1196,14 @@ def main():
                                 f"{'🔒' if c['is_private'] else '#'} {c['name']}": c["id"]
                                 for c in _chs
                             }
-                            _slack_col1, _slack_col2 = st.columns([3, 1])
-                            with _slack_col1:
+                            _sc1, _sc2 = st.columns([3, 1])
+                            with _sc1:
                                 _sel = st.selectbox(
                                     "Select channel",
                                     options=list(_ch_options.keys()),
                                     key=f"vac_slack_ch_{card.id}",
                                 )
-                            with _slack_col2:
+                            with _sc2:
                                 st.markdown("<br>", unsafe_allow_html=True)
                                 if st.button("🔄", key=f"vac_slack_refresh_{card.id}",
                                              use_container_width=True):
@@ -1163,11 +1211,17 @@ def main():
                                     st.rerun()
                             _sent_key = f"vac_slack_sent_{card.id}"
                             if st.session_state.get(_sent_key):
-                                st.success("✅ AC posted to Slack!")
+                                st.success("✅ Report posted to Slack!")
                                 if st.button("📢 Post again", key=f"vac_slack_again_{card.id}"):
                                     st.session_state[_sent_key] = False
                                     st.rerun()
                             else:
+                                _slack_msg = (
+                                    f"*AC Validation — {vac_report.overall_status}*\n"
+                                    f"{vac_report.summary}\n\n"
+                                    + ("*Missing Scenarios:*\n" + "\n".join(f"• {g}" for g in vac_report.ac_gaps) + "\n\n" if vac_report.ac_gaps else "")
+                                    + ("*Suggestions:*\n" + "\n".join(f"• {s}" for s in vac_report.suggestions) if vac_report.suggestions else "")
+                                ).strip()
                                 if st.button(
                                     f"📢 Post to {_sel}",
                                     key=f"vac_slack_send_{card.id}",
@@ -1178,8 +1232,8 @@ def main():
                                         _res = post_content_to_slack_channel(
                                             channel_id=_ch_options[_sel],
                                             card_name=card.name,
-                                            content_text=ac_suggestion,
-                                            content_label="Acceptance Criteria",
+                                            content_text=_slack_msg,
+                                            content_label="AC Validation",
                                             card_url=getattr(card, "url", ""),
                                         )
                                     if _res["ok"]:
@@ -1190,14 +1244,14 @@ def main():
                         else:
                             st.info("No channels found — check SLACK_BOT_TOKEN in .env")
 
-                    # ── Regenerate link ────────────────────────────────────
+                    # ── Re-validate link ───────────────────────────────────
                     if st.button(
-                        "🔄 Regenerate AC",
+                        "🔄 Re-validate",
                         key=f"vac_regen_{card.id}",
-                        help="Discard and regenerate",
+                        help="Run validation again",
                     ):
-                        del st.session_state[ac_suggest_key]
-                        st.session_state.pop(ac_saved_key, None)
+                        st.session_state.pop(_vac_key, None)
+                        st.session_state.pop(_vac_saved, None)
                         st.rerun()
 
     # ═══ Tab: Generate Scenarios ════════════════════════════════════════════
