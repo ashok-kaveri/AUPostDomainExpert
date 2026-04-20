@@ -183,12 +183,23 @@ RULE: scenario about "add new product / create product / product with many varia
 
 ### ⚠️ How to Generate a Label (CORRECT FLOW — via Shopify Orders)
 Label generation happens through the Shopify admin Orders section:
-1. Click "Orders" in the Shopify LEFT sidebar (not the app sidebar)
-2. Click on an order ID to open the order detail page
-3. Click "More Actions" button (top-right dropdown on the order page)
-4. You will see label options:
-   - "Generate Label" → manual label generation (user picks service/package)
-   - "Auto-Generate Label" → automatically picks service and generates
+
+⚠️ CRITICAL — TWO DIFFERENT "Orders" EXIST ON THE PAGE:
+  ✅ CORRECT:  "Orders" link at the TOP of the Shopify LEFT sidebar (shows a count badge e.g. "202")
+               This is the SHOPIFY ADMIN orders list — use this for label generation
+  ❌ WRONG:    "Shipping" under Apps > QA-AuPost in the sidebar — that is the AU Post app's grid
+
+When nav_clicks = ["Orders"], the browser navigates DIRECTLY via URL to:
+  https://admin.shopify.com/store/<store>/orders
+This bypasses the sidebar click entirely — you will land on the Shopify Orders list page.
+
+FLOW once on Shopify Orders list:
+1. You see a list of orders — the most recently created order is at the TOP
+2. Click the order row / order number to open the order detail page
+3. On the order detail page: click "More Actions" button (top-right, OUTSIDE any iframe)
+4. You will see label options in the dropdown:
+   - "Generate Label"      → manual label (user picks service/package)
+   - "Auto-Generate Label" → AU Post picks service and generates automatically
 5. Click the desired option → the AU Post app opens inside Shopify for label creation
 6. Manual flow: Generate Packages → Get Shipping Rates → select service → Generate Label
 
@@ -231,8 +242,11 @@ order_action = create_new  (verifier creates a fresh Shopify order BEFORE the br
 nav_clicks: ["Orders"]  (start on Shopify Orders page)
 
 STEP 1 — Navigate to fresh order and start manual label:
-  The fresh order just created is the MOST RECENT order at the top.
-  → Click on it → More Actions → "Generate Label" (use MANUAL label flow)
+  The browser lands directly on Shopify admin Orders via URL — you are already on the correct page.
+  ⚠️ Do NOT click "Shipping" in the AU Post app sidebar — that goes to the wrong place.
+  The fresh order just created is the MOST RECENT order at the top of the Shopify Orders list.
+  → Click the order row / order number to open the Shopify order detail page.
+  → Click "More Actions" (top-right of the Shopify order page, OUTSIDE any iframe) → "Generate Label"
   → Generate Packages → Get Shipping Rates (rates appear as radio buttons)
 
 STEP 2 — Configure SideDock BEFORE clicking Generate Label:
@@ -294,9 +308,11 @@ order_action = create_new  (verifier creates a fresh Shopify order via API BEFOR
 nav_clicks: ["Orders"]  (Shopify admin Orders page — admin.shopify.com/store/.../orders)
 
 STEP 1 — Find and open the fresh order:
+  The browser lands directly on Shopify admin Orders via URL — you are already on the correct page.
+  ⚠️ Do NOT click "Shipping" under Apps in the sidebar — that is the AU Post app, NOT Shopify Orders.
   The fresh order created by the verifier is the MOST RECENT order at the top of the list.
   The order context above names it (e.g. "Order #1234").
-  → Look at the orders list and click the most recent order row.
+  → Click the order row / order number link to open the order detail page.
   → You are now on the Shopify order DETAIL page (NOT the AU Post app).
 
 STEP 2 — Auto-generate the label:
