@@ -1644,7 +1644,9 @@ def _validate_order_action(scenario: str, claude_choice: str) -> str:
             return "existing_fulfilled"
 
     _new_order_signals = [
-        "generate label", "create label", "auto-generate label", "manual label",
+        "generate label", "create label", "auto-generate label", "auto generate label",
+        "generate auto label", "au post generate label", "manual label",
+        "create order via api", "create an order via api",
         "signature on delivery", "authority to leave", " atl ",
         "extra cover", "safe drop", "dangerous goods",
         "domestic label", "international label",
@@ -1946,6 +1948,23 @@ def _verify_scenario(
             pass
 
     nav_clicks = plan_data.get("nav_clicks", [])
+
+    # ── Python-level nav override ─────────────────────────────────────────────
+    # Force nav_clicks to ["Orders"] (Shopify admin Orders) when the scenario
+    # explicitly involves Shopify Orders or auto-generate label, regardless of
+    # what Claude planned. Prevents Claude choosing "Shipping" (AU Post app) instead.
+    _s_lower = scenario.lower()
+    _shopify_order_signals = [
+        "shopify orders", "shopify order", "navigate to shopify",
+        "auto generate label", "auto-generate label", "generate auto label",
+        "au post generate label", "aupost generate label",
+        "create order via api", "create an order via api",
+    ]
+    if any(sig in _s_lower for sig in _shopify_order_signals):
+        if "Orders" not in nav_clicks and "orders" not in [n.lower() for n in nav_clicks]:
+            logger.info("[nav_override] Scenario signals Shopify Orders flow — overriding nav_clicks to ['Orders']")
+            nav_clicks = ["Orders"]
+
     _store = app_base.split("/store/")[1].split("/")[0] if "/store/" in app_base else ""
     _APP_URL_MAP = {
         "shipping":        f"{app_base}/shopify",
