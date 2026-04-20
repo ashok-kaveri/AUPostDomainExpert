@@ -1038,9 +1038,10 @@ def main():
     # Tab: Validate Acceptance Criteria — Steps 1, 1b, 2
     # ═══════════════════════════════════════════════════════════════════════════
     with tab_validate_ac:
-        if not cards:
+        cards_loaded = bool(st.session_state.get("rqa_cards", []))
+        with st.expander("📥 Load / Change Cards", expanded=not cards_loaded):
             _render_release_setup()
-            st.stop()
+
 
 
         from pipeline.trello_client import TrelloClient
@@ -1261,15 +1262,14 @@ def main():
 
     # ═══ Tab: Generate Scenarios ════════════════════════════════════════════
     with tab_gen_scenarios:
-        if not cards:
-            _render_release_setup()
-            st.stop()
-
         cards           = st.session_state.get("rqa_cards", [])
         tc_store        = st.session_state.setdefault("rqa_test_cases", {})
         current_release = st.session_state.get("rqa_release", "")
+
+        with st.expander("📥 Load / Change Cards", expanded=not bool(cards)):
+            _render_release_setup()
+
         if not cards:
-            st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
             st.stop()
 
         from pipeline.trello_client import TrelloClient
@@ -1431,9 +1431,10 @@ def main():
 
     # ═══ Tab: Run Smart Scenarios ══════════════════════════════════════════
     with tab_run_smart:
-        if not cards:
+        cards_loaded = bool(st.session_state.get("rqa_cards", []))
+        with st.expander("📥 Load / Change Cards", expanded=not cards_loaded):
             _render_release_setup()
-            st.stop()
+
 
         # Refresh local refs from session_state
         cards = st.session_state.get("rqa_cards", [])
@@ -1441,7 +1442,7 @@ def main():
         approved_store = st.session_state.setdefault("rqa_approved", {})
         current_release = st.session_state.get("rqa_release", "")
         if not cards:
-            st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
+            st.info("👆 Select a board and list above, then click Load Cards.")
             st.stop()
 
         from pipeline.trello_client import TrelloClient
@@ -2116,7 +2117,7 @@ def main():
             approved_store = st.session_state.setdefault("rqa_approved", {})
             current_release = st.session_state.get("rqa_release", "")
             if not cards:
-                st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
+                st.info("👆 Select a board and list above, then click Load Cards.")
                 st.stop()
 
             from pipeline.trello_client import TrelloClient
@@ -3497,9 +3498,10 @@ def main():
 
     # ═══ Tab: Generate Documents ══════════════════════════════════════════
     with tab_gen_docs:
-        if not cards:
+        cards_loaded = bool(st.session_state.get("rqa_cards", []))
+        with st.expander("📥 Load / Change Cards", expanded=not cards_loaded):
             _render_release_setup()
-            st.stop()
+
 
         # Refresh local refs from session_state
         cards = st.session_state.get("rqa_cards", [])
@@ -3507,7 +3509,7 @@ def main():
         approved_store = st.session_state.setdefault("rqa_approved", {})
         current_release = st.session_state.get("rqa_release", "")
         if not cards:
-            st.info("No cards loaded. Use 'Validate Acceptance Criteria' tab to load a release.")
+            st.info("👆 Select a board and list above, then click Load Cards.")
             st.stop()
 
         from pipeline.trello_client import TrelloClient
