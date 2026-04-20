@@ -1,23 +1,28 @@
 """
 Automation Writer  —  Pipeline Step 5
 ======================================
-Browser-assisted Playwright TypeScript code generation.
+Browser-assisted Playwright TypeScript code generation for the AU Post automation repo.
 
-Flow:
-  ① Find existing POM via registry + keyword matching (never create duplicates)
-  ② Navigate to the real page with stored auth session → capture live elements
-  ③a EXISTING POM → add new locators + methods (append only, no overwrite)
-      Always create a SEPARATE new spec file for this card
-  ③b NEW PAGE     → create POM with real locators + new spec + update fixtures.ts
-  ④ Commit to automation/<branch> and push (never main)
+Repo layout:
+  support/pages/login/loginPage.ts              → LoginPage
+  support/pages/shipping/shippingPage_orderGrid.ts → ShippingPage_OrderGrid (app iframe)
+  support/pages/shipping/shippingPage_orderDetails.ts → ShippingPage_OrderDetails (app iframe)
+  support/pages/shopifyUI/shopify_OrderGrid.ts  → ShopifyOrderGrid (Shopify admin)
+  support/pages/shopifyUI/shopify_OrderSummary.ts → ShopifyOrderSummary (Shopify admin)
+  support/pages/createOrderAPI/createOrderAPI.ts → CreateOrderFromAPI
+  support/pages/basePage.ts                     → BasePage (base class)
+  tests/*.spec.ts                               → spec files (flat, no subfolders)
 
-Key rules enforced:
-  - Import test/expect from '../../src/setup/fixtures' (not @playwright/test)
+Key rules:
+  - Import { test, expect } from '@playwright/test' (NOT from fixtures)
+  - Import POMs directly: import ShippingPage_OrderGrid from '../support/pages/shipping/shippingPage_orderGrid'
+  - Instantiate POMs manually in beforeAll: new ShippingPage_OrderGrid(page)
   - All POMs extend BasePage, locators are readonly class properties
-  - this.appFrame for app iframe locators, this.page for Shopify admin
+  - iframe elements: this.iframeLocator = page.frameLocator('iframe[name="app-iframe"]')
   - test.describe.configure({ mode: 'serial' }) on every describe block
   - Every test has at least one expect()
   - No page.waitForTimeout() > 3000ms, no test.only()
+  - Create order via API using CreateOrderFromAPI.uploadOrder()
 """
 from __future__ import annotations
 import json
@@ -50,97 +55,119 @@ ENV_FILE  = CODEBASE / ".env"
 # nav:      app navigation path for browser capture.
 
 POM_REGISTRY: list[dict] = [
+    # ── App iframe POMs (inside iframe[name="app-iframe"]) ──────────────────
     {
-        "id": "additionalServices",
-        "file": "src/pages/app/settings/additionalServices.ts",
-        "class": "AdditionalServices",
-        "fixture": "additionalServices",
+        "id": "shippingPage_orderGrid",
+        "file": "support/pages/shipping/shippingPage_orderGrid.ts",
+        "class": "ShippingPage_OrderGrid",
+        "fixture": "shippingPage_orderGrid",
         "keywords": [
-            "dry ice", "duties", "tax", "signature", "saturday delivery",
-            "one rate", "alcohol", "dangerous goods", "hold at location",
-            "additional service", "adult signature",
+            "order grid", "orders list", "all orders", "pending orders",
+            "label generated", "manifest", "generate manifest", "order filter",
+            "search order", "order status", "order grid filter", "filter orders",
+            "order id filter", "sku filter", "date filter", "customer filter",
         ],
-        "nav": "Settings > Additional Services",
-        "app_path": "settings/additional-services",
+        "nav": "App sidebar → Shipping (All Orders grid)",
+        "app_path": "shopify",
     },
     {
-        "id": "packagingSettingsPage",
-        "file": "src/pages/app/settings/packagingSettingsPage.ts",
-        "class": "PackagingSettingsPage",
-        "fixture": "packagingSettingsPage",
-        "keywords": ["packaging", "box", "weight based", "dimension", "pack items"],
-        "nav": "Settings > Packaging",
-        "app_path": "settings/packaging",
+        "id": "shippingPage_orderDetails",
+        "file": "support/pages/shipping/shippingPage_orderDetails.ts",
+        "class": "ShippingPage_OrderDetails",
+        "fixture": "shippingPage_orderDetails",
+        "keywords": [
+            "generate label", "label generation", "single label", "manual label",
+            "order details", "order summary", "label status", "print documents",
+            "download documents", "cancel label", "return label", "side dock",
+            "extra cover", "signature on delivery", "authority to leave",
+            "safe drop", "dangerous goods", "packages tab",
+        ],
+        "nav": "App sidebar → Shipping → click order row → Order Summary",
+        "app_path": "shopify",
+    },
+    # ── Shopify Admin POMs (outside iframe) ─────────────────────────────────
+    {
+        "id": "shopify_OrderGrid",
+        "file": "support/pages/shopifyUI/shopify_OrderGrid.ts",
+        "class": "ShopifyOrderGrid",
+        "fixture": "shopifyOrderGrid",
+        "keywords": [
+            "shopify orders", "shopify order grid", "shopify admin orders",
+            "more actions generate label", "create order",
+        ],
+        "nav": "Shopify Admin → Orders",
+        "app_path": "",
     },
     {
-        "id": "manualLabelPage",
-        "file": "src/pages/app/ManualLabelPage/ManualLabelPage.ts",
-        "class": "GenerateLabelManuallyPage",
-        "fixture": "manualLabelPage",
-        "keywords": ["label", "generate label", "single label", "manual label", "label generation"],
-        "nav": "Orders > Generate Label",
-        "app_path": "orders",
+        "id": "shopify_OrderSummary",
+        "file": "support/pages/shopifyUI/shopify_OrderSummary.ts",
+        "class": "ShopifyOrderSummary",
+        "fixture": "shopifyOrderSummary",
+        "keywords": [
+            "shopify order summary", "more actions", "au post generate label",
+            "generate return label", "shopify more actions",
+        ],
+        "nav": "Shopify Admin → Orders → click order",
+        "app_path": "",
     },
+    # ── Settings POMs (to be created as features are built) ─────────────────
     {
-        "id": "pickupPage",
-        "file": "src/pages/app/PickupPage/PickupPage.ts",
-        "class": "PickupPage",
-        "fixture": "pickupPage",
-        "keywords": ["pickup", "schedule pickup", "pick up"],
-        "nav": "Shipping > Schedule Pickup",
-        "app_path": "shipping/pickup",
-    },
-    {
-        "id": "returnLabelPage",
-        "file": "src/pages/app/returnLabelPage/returnLabelPage.ts",
-        "class": "ReturnLabelPage",
-        "fixture": "returnLabelPage",
-        "keywords": ["return", "return label", "return setting"],
-        "nav": "Orders > Return Label",
-        "app_path": "return-labels",
-    },
-    {
-        "id": "shippingPage",
-        "file": "src/pages/app/ShippingPage/ShippingPage.ts",
-        "class": "ShippingPage",
-        "fixture": "shippingPage",
-        "keywords": ["shipping rate", "rate setting", "carrier service", "rate adjustment",
-                     "display name", "checkout rate"],
-        "nav": "Settings > Rate Settings",
-        "app_path": "settings/rate-settings",
+        "id": "settingsPage",
+        "file": "support/pages/settings/settingsPage.ts",
+        "class": "SettingsPage",
+        "fixture": "settingsPage",
+        "keywords": [
+            "settings", "account settings", "eparcel", "mypost business",
+            "api credentials", "account type", "print settings",
+            "notification", "rate settings", "packages settings",
+        ],
+        "nav": "App sidebar → Settings",
+        "app_path": "settings",
     },
     {
         "id": "productsPage",
-        "file": "src/pages/app/Products/productsPage_M.ts",
-        "class": "ProductsPage_M",
+        "file": "support/pages/products/productsPage.ts",
+        "class": "ProductsPage",
         "fixture": "productsPage",
-        "keywords": ["product", "shopify product"],
-        "nav": "Products",
+        "keywords": [
+            "products", "product dimensions", "product weight",
+            "dangerous goods product", "extra cover product",
+            "signature product", "authority to leave product",
+        ],
+        "nav": "App sidebar → Products",
         "app_path": "products",
     },
     {
-        "id": "orderSummaryPage",
-        "file": "src/pages/app/OrderSummaryPage/OrderSummaryPage.ts",
-        "class": "OrderSummaryPage",
-        "fixture": "orderSummaryPage",
-        "keywords": ["order summary", "label generated", "fulfillment", "order grid",
-                     "orders page", "order list"],
-        "nav": "Shipping > Orders",
-        "app_path": "shipping",
+        "id": "pickupPage",
+        "file": "support/pages/pickup/pickupPage.ts",
+        "class": "PickupPage",
+        "fixture": "pickupPage",
+        "keywords": ["pickup", "schedule pickup", "pick up"],
+        "nav": "App sidebar → PickUp",
+        "app_path": "pickup",
+    },
+    {
+        "id": "ratesLogPage",
+        "file": "support/pages/ratesLog/ratesLogPage.ts",
+        "class": "RatesLogPage",
+        "fixture": "ratesLogPage",
+        "keywords": ["rates log", "rate log", "rate request", "rate history"],
+        "nav": "App sidebar → Rates Log",
+        "app_path": "rateslog",
     },
 ]
 
-# Area → test folder mapping
+# POM id → test folder mapping (flat tests/ structure in AU Post repo)
 AREA_FOLDER: dict[str, str] = {
-    "additionalServices":    "tests/additionalServices",
-    "packagingSettingsPage": "tests/packaging",
-    "manualLabelPage":       "tests/label_generation",
-    "pickupPage":            "tests/pickup",
-    "returnLabelPage":       "tests/returnLabels",
-    "shippingPage":          "tests/additionalServices",
-    "productsPage":          "tests/product_Special_Service",
-    "orderSummaryPage":      "tests/label_generation",
-    "_new":                  "tests/additionalServices",
+    "shippingPage_orderGrid":    "tests",
+    "shippingPage_orderDetails": "tests",
+    "shopify_OrderGrid":         "tests",
+    "shopify_OrderSummary":      "tests",
+    "settingsPage":              "tests",
+    "productsPage":              "tests",
+    "pickupPage":                "tests",
+    "ratesLogPage":              "tests",
+    "_new":                      "tests",
 }
 
 
@@ -412,8 +439,6 @@ NEW_SPEC_PROMPT = dedent("""\
     {test_cases}
 
     Page Object class: {pom_class}
-    Fixture property:  pages.{fixture}  (already registered — do NOT touch fixtures.ts)
-
     Spec file path: {spec_path}
 
     ## COMPLETE PAGE OBJECT FILE (the ONLY methods you may call)
@@ -431,54 +456,57 @@ NEW_SPEC_PROMPT = dedent("""\
     Start with: === SPEC FILE: {spec_path} ===
     Output ONLY TypeScript — NO markdown tables, NO explanation text, NO "Design Decisions".
 
+    ## AU Post Repo Import & Instantiation Pattern (MUST follow exactly):
+    ```typescript
+    import {{ test, expect, BrowserContext, Page }} from '@playwright/test';
+    import LoginPage from '../support/pages/login/loginPage';
+    import CreateOrderFromAPI from '../support/pages/createOrderAPI/createOrderAPI';
+    import {pom_class} from '{fixtures_import}/{pom_file_rel}';
+    // Add other POM imports as needed
+
+    test.describe.configure({{ mode: 'serial' }});
+
+    test.describe('Feature description', {{ tag: '@smoke' }}, () => {{
+      test.setTimeout(120 * 1000);
+      let context: BrowserContext;
+      let page: Page;
+      let loginPage: LoginPage;
+      let orderID: string;
+      let orderUploader: CreateOrderFromAPI;
+      let pomInstance: {pom_class};
+
+      test.beforeAll(async ({{ browser }}) => {{
+        context = await browser.newContext();
+        page = await context.newPage();
+        orderUploader = new CreateOrderFromAPI();
+        loginPage = new LoginPage(page);
+        pomInstance = new {pom_class}(page);
+        await loginPage.loginInToAUPost();
+        await page.waitForTimeout(3000);
+        await loginPage.clickAccountCard(page);
+      }});
+
+      test.afterAll(async () => {{ await context.close(); }});
+
+      test('Create an order from API', async () => {{
+        orderID = (await orderUploader.uploadOrder()) as string;
+        expect(orderID).toBeTruthy();
+      }});
+
+      // ... feature tests follow
+    }});
+    ```
+
     Rules:
-    - import {{ test, expect }} from '{fixtures_import}'
-    - import ShopifyOrderUploader from '../../src/helpers/createOrder'  (adjust depth)
-    - test.describe.configure({{ mode: 'serial' }})
-    - Use pages.{fixture} to call methods from the page object
+    - Import {{ test, expect }} from '@playwright/test' (NEVER from fixtures)
+    - Import POMs directly from '../support/pages/...' (relative from tests/ folder)
+    - Instantiate POMs manually in beforeAll (NO fixtures system)
+    - Use descriptive test names matching the test case scenarios
     - ONLY call methods that exist in the POM above — never invent method names
     - If a test case requires backend mocking or API simulation, use test.skip()
     - Every test must have at least one expect()
     - No test.only(), no waitForTimeout() > 3000
-    - Use descriptive test names matching the test case scenarios
-    - Add tag: {{ tag: '@smoke' }} to the describe block
-
-    ## Critical API contracts — NEVER deviate from these:
-
-    ### STORE declaration — always use this exact pattern at the top of the file:
-    ```
-    const store = process.env.STORE;
-    if (!store) {{
-      throw new Error('STORE environment variable is required');
-    }}
-    ```
-    ⚠️ Do NOT use `process.env.STORE!` (non-null assertion) — use the null-check pattern above.
-
-    ### Order creation — ALWAYS a dedicated test() block, NEVER test.beforeAll():
-    ```
-    test('Create an order from API', async () => {{
-      orderUploader = new ShopifyOrderUploader();
-      const orderID = await orderUploader.uploadOrder();
-      if (!orderID) {{
-        throw new Error('Failed to create Shopify order');
-      }}
-      sharedOrderID = orderID;
-      console.log(`Order created: ${{sharedOrderID}}`);
-      expect(orderID).toBeTruthy();
-    }});
-    ```
-    ⚠️ NEVER put order creation or expect() inside test.beforeAll(). beforeAll() must only
-       contain setup that does NOT create orders (e.g., page navigation, configuration).
-       If no beforeAll is needed, omit it entirely.
-
-    ### Other contracts:
-    - ShopifyOrderUploader constructor takes NO arguments: new ShopifyOrderUploader()
-    - uploadOrder() → Promise<string | undefined>: check with if (!orderID) throw
-    - uploadOrder('CA') for Canada/international orders
-    - ShopifyOrderUploader reads STORE from process.env automatically — do NOT pass store
-    - pages.shopifyAdmin.navigateToStore(store) to navigate
-    - pages.shopifyAdmin.searchAndOpenOrder(orderID) to open an order
-    - pages.manualLabelPage.generateLabelInApp() to generate a label end-to-end
+    - CreateOrderFromAPI.uploadOrder() returns Promise<string> — cast with 'as string'
 """)
 
 NEW_POM_PROMPT = dedent("""\
@@ -506,12 +534,41 @@ NEW_POM_PROMPT = dedent("""\
     Generate the complete POM file.
     Start with: === NEW POM: {pom_path} ===
 
+    ## AU Post POM Pattern (follow exactly):
+    ```typescript
+    import {{ Page, FrameLocator, Locator, expect }} from '@playwright/test';
+    import BasePage from '../basePage';  // adjust relative depth as needed
+
+    class {class_name} extends BasePage {{
+      readonly page: Page;
+      readonly iframeLocator: FrameLocator;  // only if this is an app-iframe page
+
+      // Locators (POM Standard)
+      readonly someButton: Locator;
+
+      constructor(page: Page) {{
+        super(page);
+        this.page = page;
+        this.iframeLocator = this.page.frameLocator('iframe[name="app-iframe"]');
+
+        // Initialize locators
+        this.someButton = this.iframeLocator.getByRole('button', {{ name: 'Example' }});
+      }}
+
+      async doSomething() {{
+        await this.someButton.click();
+      }}
+    }}
+
+    export default {class_name};
+    ```
+
     Rules:
-    - import {{ Page, Locator }} from '@playwright/test'
-    - import {{ BasePage }} from '../../basePage' (adjust relative path as needed)
-    - export class {class_name} extends BasePage
+    - import BasePage from '../basePage' (adjust relative path based on folder depth)
+    - export default {class_name} (default export, NOT named export)
     - All locators as readonly properties, initialized in constructor
-    - this.appFrame.getByRole / getByLabel / getByText / locator for iframe elements
+    - Use this.iframeLocator for AU Post app elements (inside iframe[name="app-iframe"])
+    - Use this.page directly for Shopify admin elements (outside iframe)
     - Add action methods for each interaction the tests will need
 """)
 
@@ -720,15 +777,13 @@ FIX_PROMPT = dedent("""\
     - Do not add test.only()
 
     ## Critical API contracts — NEVER deviate:
-    - ShopifyOrderUploader takes NO constructor arguments: new ShopifyOrderUploader()
-    - uploadOrder() returns Promise<string | undefined> — always check: if (!orderID) throw new Error(...)
-    - uploadOrder('CA') for international/Canada orders
-    - NEVER pass store or any argument to new ShopifyOrderUploader()
-    - STORE declaration — ALWAYS this exact pattern (no non-null assertion):
-        const store = process.env.STORE;
-        if (!store) {{ throw new Error('STORE environment variable is required'); }}
+    - Import {{ test, expect }} from '@playwright/test' (not fixtures)
+    - Import POMs directly from '../support/pages/...' and instantiate manually
+    - CreateOrderFromAPI takes NO constructor arguments: new CreateOrderFromAPI()
+    - uploadOrder() returns Promise<string> — cast with: orderID = (await orderUploader.uploadOrder()) as string
     - Order creation MUST be in a dedicated test() block — NEVER in test.beforeAll()
     - NEVER put expect() inside test.beforeAll()
+    - loginPage.loginInToAUPost() handles session reuse automatically
 
     Return ONLY the fixed TypeScript files — NO explanations, NO markdown tables,
     NO comments outside the code, NO "Design Decisions" sections.
@@ -976,9 +1031,11 @@ def _spec_path(card_name: str, pom_id: str) -> str:
 
 
 def _fixtures_import(spec_path: str) -> str:
-    """Calculate relative import path from spec to fixtures.ts."""
+    """Calculate relative import path from spec to support/pages POMs.
+    AU Post repo layout: tests/*.spec.ts → ../support/pages/...
+    """
     depth = spec_path.count("/")
-    return "../" * depth + "src/setup/fixtures"
+    return "../" * depth + "support/pages"
 
 
 def _query_domain_expert(card_name: str, test_cases: str) -> tuple[str, list[str]]:
@@ -1007,9 +1064,9 @@ def _query_domain_expert(card_name: str, test_cases: str) -> tuple[str, list[str
             query = f"TypeScript Playwright spec POM {card_name} test describe"
             auto_docs = search_code(query, k=5, source_type="automation")
 
-            # Also query for helper/setup patterns
+            # Also query for login + order creation patterns
             helper_docs = search_code(
-                f"fixture import helper createOrder ShopifyOrderUploader {card_name}", k=3,
+                f"loginPage CreateOrderFromAPI uploadOrder loginInToAUPost {card_name}", k=3,
                 source_type="automation",
             )
 
@@ -1120,11 +1177,11 @@ def _handle_existing_pom(
         card_name=card_name,
         test_cases=test_cases + qa_note,
         pom_class=pom_class,
-        fixture=fixture_prop,
         spec_path=spec_path,
         pom_content=final_pom[:5000],
         browser_elements=browser_elements[:500],
         fixtures_import=_fixtures_import(spec_path),
+        pom_file_rel=pom_file,
         rag_context=rag_context[:800],
     )
     spec_resp = claude.invoke([HumanMessage(content=spec_prompt)])
@@ -1163,7 +1220,7 @@ def _handle_new_pom(
     """
     class_name   = _pascal(card_name) + "Page"
     fixture_prop = _camel(card_name) + "Page"
-    pom_file     = f"src/pages/app/{_pascal(card_name)}/{_pascal(card_name)}.ts"
+    pom_file     = f"support/pages/app/{_pascal(card_name)}/{_pascal(card_name)}.ts"
     spec_path    = _spec_path(card_name, "_new")
     conventions  = _load_conventions()[:3000]
     pom_sample   = ""
@@ -1203,11 +1260,11 @@ def _handle_new_pom(
         card_name=card_name,
         test_cases=test_cases + qa_note,
         pom_class=class_name,
-        fixture=fixture_prop,
         spec_path=spec_path,
         pom_content=pom_content[:5000],
         browser_elements=browser_elements[:500],
         fixtures_import=_fixtures_import(spec_path),
+        pom_file_rel=pom_file,
         rag_context=rag_context[:800],
     )
     spec_resp = claude.invoke([HumanMessage(content=spec_prompt)])
@@ -1219,24 +1276,7 @@ def _handle_new_pom(
         files_written.append(spec_path)
         logger.info("Created spec: %s", spec_path)
 
-    # ── Update fixtures.ts ───────────────────────────────────────────────
-    if not dry_run:
-        fixtures_content = _read_file("src/setup/fixtures.ts")
-        if fixtures_content:
-            # relative import from fixtures.ts → new POM
-            import_path = f"../pages/app/{_pascal(card_name)}/{_pascal(card_name)}"
-            fix_prompt = FIXTURES_UPDATE_PROMPT.format(
-                class_name=class_name,
-                import_path=import_path,
-                property_name=fixture_prop,
-                fixtures_content=fixtures_content[:4000],
-            )
-            fix_resp = claude.invoke([HumanMessage(content=fix_prompt)])
-            updated_fix = _parse_block(fix_resp.content, "UPDATED FILE")
-            if updated_fix:
-                _write_file("src/setup/fixtures.ts", updated_fix)
-                files_written.append("src/setup/fixtures.ts")
-                logger.info("Updated fixtures.ts")
+    # AU Post repo uses direct imports — no fixtures.ts to update
 
     return AutomationResult(
         kind="new_pom",
