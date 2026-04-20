@@ -1503,6 +1503,22 @@ def main():
                         # resolve URL: expander override → per-card field → auto-detect
                         _global_url_override = st.session_state.get("sav_global_url", "")
 
+                        # ── Custom scenario override ───────────────────────
+                        _custom_sc_key = f"sav_custom_scenario_{card.id}"
+                        _custom_scenario = st.text_area(
+                            "🎯 Run a specific scenario (optional)",
+                            key=_custom_sc_key,
+                            placeholder=(
+                                "Leave blank to run all AC scenarios from the card.\n\n"
+                                "Or type one scenario, e.g.:\n"
+                                "Given the order grid is open\n"
+                                "When I enter 'SKU-001' in the SKU filter\n"
+                                "Then only orders containing SKU-001 are shown"
+                            ),
+                            height=110,
+                            help="Claude will verify only this scenario instead of extracting from the full AC.",
+                        )
+
                         # ── Complexity selector ────────────────────────────
                         _COMPLEXITY_MAP = {
                             "🟢 Simple  (2-3 scenarios · ~$0.80 · ~4 min)":  3,
@@ -1542,7 +1558,12 @@ def main():
                                     st.session_state[_sav_stop_key] = True
                                 run_sav = False
                             else:
-                                _run_label = "🔁 Re-verify" if sav_report else "🔍 Run Smart Verification"
+                                _custom_active = bool(st.session_state.get(_custom_sc_key, "").strip())
+                                _run_label = (
+                                    "🎯 Run This Scenario" if _custom_active
+                                    else "🔁 Re-verify" if sav_report
+                                    else "🔍 Run Smart Verification"
+                                )
                                 run_sav = st.button(
                                     _run_label,
                                     key=f"run_sav_{card.id}",
@@ -1590,8 +1611,9 @@ def main():
                             else:
                                 from pipeline.smart_ac_verifier import verify_ac as _verify_ac_fn
 
-                                _ac_text     = card.desc or ""
-                                _sc_count    = max(1, sum(
+                                _custom_sc_val = st.session_state.get(_custom_sc_key, "").strip()
+                                _ac_text     = _custom_sc_val if _custom_sc_val else (card.desc or "")
+                                _sc_count    = 1 if _custom_sc_val else max(1, sum(
                                     1 for ln in _ac_text.splitlines()
                                     if ln.strip().startswith(("Given","When","Scenario","Then","-"))
                                 ))
@@ -1604,7 +1626,7 @@ def main():
                                 _rk  = _sav_result_key
                                 _pk  = _sav_prog_key
                                 _sk  = _sav_stop_key
-                                _max_sc = st.session_state.get(_complexity_key)
+                                _max_sc = 1 if _custom_sc_val else st.session_state.get(_complexity_key)
                                 _sh_email = st.session_state.get("shopify_email", "")
                                 _sh_pass  = st.session_state.get("shopify_password", "")
 
