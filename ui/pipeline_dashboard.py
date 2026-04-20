@@ -1166,7 +1166,7 @@ def main():
                     with col_proc1:
                         if st.button(
                             "➡️ Proceed to Automation",
-                            key=f"proceed_{card.id}",
+                            key=f"vac_proceed_{card.id}",
                             use_container_width=True,
                             type="primary",
                             help="Skip AC + TC generation — use existing and go straight to writing automation",
@@ -1179,14 +1179,14 @@ def main():
                     with col_proc2:
                         if st.button(
                             "📋 View existing TCs",
-                            key=f"view_tc_{card.id}",
+                            key=f"vac_view_tc_{card.id}",
                             use_container_width=True,
                         ):
                             st.session_state[f"show_existing_tc_{card.id}"] = True
                     with col_proc3:
                         if st.button(
                             "🔄 Regenerate",
-                            key=f"banner_regen_{card.id}",
+                            key=f"vac_banner_regen_{card.id}",
                             use_container_width=True,
                             help="Start fresh — will add new rows to Trello + Sheet",
                         ):
@@ -1195,7 +1195,7 @@ def main():
                     if st.session_state.get(f"show_existing_tc_{card.id}"):
                         with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
                             st.markdown(existing_tc_comment)
-                            if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                            if st.button("✖ Close", key=f"vac_close_tc_{card.id}"):
                                 del st.session_state[f"show_existing_tc_{card.id}"]
                                 st.rerun()
 
@@ -1224,7 +1224,7 @@ def main():
                         st.markdown(ac_suggestion)
                         col_save_ac, col_comment_ac, col_skip_ac, col_dm_ac, col_ch_ac = st.columns(5)
                         with col_save_ac:
-                            if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
+                            if st.button("✅ Save to Trello Description", key=f"vac_save_ac_{card.id}",
                                          use_container_width=True, type="primary"):
                                 with st.spinner("Updating Trello description…"):
                                     TrelloClient(board_id=st.session_state.get("selected_board_id") or None).update_card_description(card.id, ac_suggestion)
@@ -1232,23 +1232,23 @@ def main():
                                 st.session_state[ac_saved_key] = True
                                 st.rerun()
                         with col_comment_ac:
-                            if st.button("💬 Add to Trello Comment", key=f"comment_ac_{card.id}",
+                            if st.button("💬 Add to Trello Comment", key=f"vac_comment_ac_{card.id}",
                                          use_container_width=True):
                                 with st.spinner("Adding comment to Trello card…"):
                                     TrelloClient(board_id=st.session_state.get("selected_board_id") or None).add_comment(card.id, ac_suggestion)
                                 st.success("✅ AC added as Trello comment")
                         with col_skip_ac:
-                            if st.button("⏭️ Skip — Keep Existing", key=f"skip_ac_{card.id}",
+                            if st.button("⏭️ Skip — Keep Existing", key=f"vac_skip_ac_{card.id}",
                                          use_container_width=True):
                                 st.session_state[ac_saved_key] = True  # mark done so it collapses
                                 st.rerun()
                         with col_dm_ac:
-                            if st.button("📨 Send via Slack DM", key=f"open_dm_ac_{card.id}",
+                            if st.button("📨 Send via Slack DM", key=f"vac_open_dm_ac_{card.id}",
                                          use_container_width=True):
                                 st.session_state[f"show_dm_ac_{card.id}"] = True
                                 st.session_state[f"show_ch_ac_{card.id}"] = False
                         with col_ch_ac:
-                            if st.button("📢 Send to Channel", key=f"open_ch_ac_{card.id}",
+                            if st.button("📢 Send to Channel", key=f"vac_open_ch_ac_{card.id}",
                                          use_container_width=True):
                                 st.session_state[f"show_ch_ac_{card.id}"] = True
                                 st.session_state[f"show_dm_ac_{card.id}"] = False
@@ -1290,11 +1290,11 @@ def main():
                                         _ac_ch_sel = st.selectbox(
                                             "Select channel",
                                             options=list(_ch_options.keys()),
-                                            key=f"ac_ch_select_{card.id}",
+                                            key=f"vac_ac_ch_select_{card.id}",
                                         )
                                     with _ac_ch_ref_col:
                                         st.markdown("<br>", unsafe_allow_html=True)
-                                        if st.button("🔄 Refresh", key=f"ac_ch_refresh_{card.id}",
+                                        if st.button("🔄 Refresh", key=f"vac_ac_ch_refresh_{card.id}",
                                                      use_container_width=True):
                                             del st.session_state[_ch_cache_key]
                                             st.rerun()
@@ -1302,13 +1302,13 @@ def main():
                                     _ac_ch_sent_key = f"ac_ch_sent_{card.id}"
                                     if st.session_state.get(_ac_ch_sent_key):
                                         st.success("✅ AC posted to channel!")
-                                        if st.button("📢 Post again", key=f"ac_ch_resend_{card.id}"):
+                                        if st.button("📢 Post again", key=f"vac_ac_ch_resend_{card.id}"):
                                             st.session_state[_ac_ch_sent_key] = False
                                             st.rerun()
                                     else:
                                         if st.button(
                                             f"📢 Post to {_ac_ch_sel}",
-                                            key=f"ac_ch_send_btn_{card.id}",
+                                            key=f"vac_ac_ch_send_btn_{card.id}",
                                             type="primary",
                                             use_container_width=True,
                                         ):
@@ -1345,13 +1345,13 @@ def main():
                                     _dm_query = st.text_input(
                                         "Search member",
                                         placeholder="Search by name — add multiple one by one",
-                                        key=f"dm_search_query_{card.id}",
+                                        key=f"vac_dm_search_query_{card.id}",
                                     )
                                 with _dm_col2:
                                     st.markdown("<br>", unsafe_allow_html=True)
                                     _do_search = st.button(
                                         "🔍 Search",
-                                        key=f"dm_search_btn_{card.id}",
+                                        key=f"vac_dm_search_btn_{card.id}",
                                         use_container_width=True,
                                     )
 
@@ -1381,11 +1381,11 @@ def main():
                                     _selected_labels = st.multiselect(
                                         "Select recipients (pick multiple)",
                                         options=list(_pool.keys()),
-                                        key=f"dm_user_multi_{card.id}",
+                                        key=f"vac_dm_user_multi_{card.id}",
                                     )
                                     # Clear pool button
                                     if st.button("✖ Clear search results",
-                                                 key=f"dm_clear_{card.id}"):
+                                                 key=f"vac_dm_clear_{card.id}"):
                                         st.session_state[_pool_key] = {}
                                         st.rerun()
 
@@ -1393,7 +1393,7 @@ def main():
                                     if st.session_state.get(_dm_sent_key):
                                         st.success("✅ AC sent via Slack DM!")
                                         if st.button("📨 Send again",
-                                                     key=f"dm_resend_{card.id}"):
+                                                     key=f"vac_dm_resend_{card.id}"):
                                             st.session_state[_dm_sent_key] = False
                                             st.rerun()
                                     elif _selected_labels:
@@ -1401,7 +1401,7 @@ def main():
                                         _n = len(_selected_uids)
                                         if st.button(
                                             f"📨 Send to {_n} person{'s' if _n > 1 else ''}",
-                                            key=f"dm_send_btn_{card.id}",
+                                            key=f"vac_dm_send_btn_{card.id}",
                                             type="primary",
                                             use_container_width=True,
                                         ):
@@ -1424,7 +1424,7 @@ def main():
                                     else:
                                         st.caption("Select at least one recipient above.")
                     else:
-                        if st.button("🤖 Generate User Story & AC", key=f"gen_ac_{card.id}"):
+                        if st.button("🤖 Generate User Story & AC", key=f"vac_gen_ac_{card.id}"):
                             from pipeline.card_processor import generate_acceptance_criteria
                             raw = f"{card.name}\n\n{card.desc or ''}".strip()
                             with st.spinner("Claude is generating User Story & AC…"):
@@ -1481,7 +1481,7 @@ def main():
 
                             # Fix + Re-validate
                             st.caption("👆 Fix the card on Trello, then re-validate below")
-                            if st.button("🔄 Re-validate after fix", key=f"reval_{card.id}"):
+                            if st.button("🔄 Re-validate after fix", key=f"vac_reval_{card.id}"):
                                 # Refresh card from Trello + re-run validation
                                 with st.spinner("Fetching updated card from Trello…"):
                                     fresh = TrelloClient(board_id=st.session_state.get("selected_board_id") or None).get_card(card.id)
@@ -1559,7 +1559,7 @@ def main():
                     with col_proc1:
                         if st.button(
                             "➡️ Proceed to Automation",
-                            key=f"proceed_{card.id}",
+                            key=f"gs_proceed_{card.id}",
                             use_container_width=True,
                             type="primary",
                             help="Skip AC + TC generation — use existing and go straight to writing automation",
@@ -1572,14 +1572,14 @@ def main():
                     with col_proc2:
                         if st.button(
                             "📋 View existing TCs",
-                            key=f"view_tc_{card.id}",
+                            key=f"gs_view_tc_{card.id}",
                             use_container_width=True,
                         ):
                             st.session_state[f"show_existing_tc_{card.id}"] = True
                     with col_proc3:
                         if st.button(
                             "🔄 Regenerate",
-                            key=f"banner_regen_{card.id}",
+                            key=f"gs_banner_regen_{card.id}",
                             use_container_width=True,
                             help="Start fresh — will add new rows to Trello + Sheet",
                         ):
@@ -1588,7 +1588,7 @@ def main():
                     if st.session_state.get(f"show_existing_tc_{card.id}"):
                         with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
                             st.markdown(existing_tc_comment)
-                            if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                            if st.button("✖ Close", key=f"gs_close_tc_{card.id}"):
                                 del st.session_state[f"show_existing_tc_{card.id}"]
                                 st.rerun()
 
@@ -1606,7 +1606,7 @@ def main():
                                "You can still generate if you want to proceed.")
 
                 if card.id not in tc_store:
-                    if st.button("🤖 Generate Test Cases", key=f"gen_{card.id}",
+                    if st.button("🤖 Generate Test Cases", key=f"gs_gen_{card.id}",
                                  type="primary" if (not vr or vr.overall_status == "PASS") else "secondary"):
                         with st.spinner("Claude is writing test cases…"):
                             tc_store[card.id] = generate_test_cases(card)
@@ -1624,13 +1624,13 @@ def main():
 
                     if st.session_state.get(_tc_dm_sent_key):
                         st.success("✅ Test cases sent via Slack DM!")
-                        if st.button("📨 Send again", key=f"tc_dm_resend_{card.id}"):
+                        if st.button("📨 Send again", key=f"gs_tc_dm_resend_{card.id}"):
                             st.session_state[_tc_dm_sent_key] = False
                             st.session_state[_tc_dm_open_key] = True
                             st.rerun()
                     elif st.session_state.get(_tc_ch_sent_key):
                         st.success("✅ Test cases posted to Slack channel!")
-                        if st.button("📢 Post again", key=f"tc_ch_resend_{card.id}"):
+                        if st.button("📢 Post again", key=f"gs_tc_ch_resend_{card.id}"):
                             st.session_state[_tc_ch_sent_key] = False
                             st.session_state[_tc_ch_open_key] = True
                             st.rerun()
@@ -1639,7 +1639,7 @@ def main():
                         with _tc_btn_col1:
                             if st.button(
                                 "📨 Send Test Cases via Slack DM",
-                                key=f"open_dm_tc_{card.id}",
+                                key=f"gs_open_dm_tc_{card.id}",
                                 use_container_width=True,
                             ):
                                 st.session_state[_tc_dm_open_key] = True
@@ -1647,7 +1647,7 @@ def main():
                         with _tc_btn_col2:
                             if st.button(
                                 "📢 Send to Slack Channel",
-                                key=f"open_ch_tc_{card.id}",
+                                key=f"gs_open_ch_tc_{card.id}",
                                 use_container_width=True,
                             ):
                                 st.session_state[_tc_ch_open_key] = True
@@ -1690,18 +1690,18 @@ def main():
                                     _tc_ch_sel = st.selectbox(
                                         "Select channel",
                                         options=list(_ch_options.keys()),
-                                        key=f"tc_ch_select_{card.id}",
+                                        key=f"gs_tc_ch_select_{card.id}",
                                     )
                                 with _tc_ch_ref_col:
                                     st.markdown("<br>", unsafe_allow_html=True)
-                                    if st.button("🔄 Refresh", key=f"tc_ch_refresh_{card.id}",
+                                    if st.button("🔄 Refresh", key=f"gs_tc_ch_refresh_{card.id}",
                                                  use_container_width=True):
                                         del st.session_state[_ch_cache_key]
                                         st.rerun()
 
                                 if st.button(
                                     f"📢 Post to {_tc_ch_sel}",
-                                    key=f"tc_ch_send_btn_{card.id}",
+                                    key=f"gs_tc_ch_send_btn_{card.id}",
                                     type="primary",
                                     use_container_width=True,
                                 ):
@@ -1738,13 +1738,13 @@ def main():
                                 _tc_dm_query = st.text_input(
                                     "Search member",
                                     placeholder="Search by name — add multiple one by one",
-                                    key=f"tc_dm_search_query_{card.id}",
+                                    key=f"gs_tc_dm_search_query_{card.id}",
                                 )
                             with _tc_dm_col2:
                                 st.markdown("<br>", unsafe_allow_html=True)
                                 _tc_do_search = st.button(
                                     "🔍 Search",
-                                    key=f"tc_dm_search_btn_{card.id}",
+                                    key=f"gs_tc_dm_search_btn_{card.id}",
                                     use_container_width=True,
                                 )
 
@@ -1774,17 +1774,17 @@ def main():
                                 _tc_selected_labels = st.multiselect(
                                     "Select recipients (pick multiple)",
                                     options=list(_tc_pool.keys()),
-                                    key=f"tc_dm_user_multi_{card.id}",
+                                    key=f"gs_tc_dm_user_multi_{card.id}",
                                 )
                                 if st.button("✖ Clear search results",
-                                             key=f"tc_dm_clear_{card.id}"):
+                                             key=f"gs_tc_dm_clear_{card.id}"):
                                     st.session_state[_tc_pool_key] = {}
                                     st.rerun()
 
                                 if st.session_state.get(_tc_dm_sent_key):
                                     st.success("✅ Test cases sent via Slack DM!")
                                     if st.button("📨 Send again",
-                                                 key=f"tc_dm_resend_inner_{card.id}"):
+                                                 key=f"gs_tc_dm_resend_inner_{card.id}"):
                                         st.session_state[_tc_dm_sent_key] = False
                                         st.rerun()
                                 elif _tc_selected_labels:
@@ -1792,7 +1792,7 @@ def main():
                                     _tc_n = len(_tc_selected_uids)
                                     if st.button(
                                         f"📨 Send to {_tc_n} person{'s' if _tc_n > 1 else ''}",
-                                        key=f"tc_dm_send_btn_{card.id}",
+                                        key=f"gs_tc_dm_send_btn_{card.id}",
                                         type="primary",
                                         use_container_width=True,
                                     ):
@@ -1855,7 +1855,7 @@ def main():
                                     "📊 Add to sheet tab",
                                     tab_options,
                                     index=tab_idx,
-                                    key=f"tab_{card.id}",
+                                    key=f"gs_tab_{card.id}",
                                 )
                             with _tc_col2:
                                 _new_tab_name = st.text_input(
@@ -1864,7 +1864,7 @@ def main():
                                     key=_new_tab_key,
                                     label_visibility="collapsed",
                                 )
-                                if st.button("➕ Create Tab", key=f"create_tab_{card.id}",
+                                if st.button("➕ Create Tab", key=f"gs_create_tab_{card.id}",
                                              use_container_width=True):
                                     if _new_tab_name.strip():
                                         from pipeline.sheets_writer import create_new_tab
@@ -1907,7 +1907,7 @@ def main():
                                                "Use 'Skip duplicates' to only write non-duplicate TCs.")
                                 force_write = st.checkbox(
                                     "Skip duplicate TCs (only add new ones)",
-                                    key=f"skip_dups_{card.id}",
+                                    key=f"gs_skip_dups_{card.id}",
                                 )
                             else:
                                 force_write = False
@@ -1919,7 +1919,7 @@ def main():
                         col_approve, col_edit = st.columns([1, 2])
 
                         with col_approve:
-                            if st.button("✅ Approve & Save", key=f"approve_{card.id}",
+                            if st.button("✅ Approve & Save", key=f"gs_approve_{card.id}",
                                          use_container_width=True, type="primary"):
                                 trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
 
@@ -2023,9 +2023,9 @@ def main():
                             feedback = st.text_input(
                                 "✏️ Request changes",
                                 placeholder="e.g. Add a test case for Saturday delivery, change TC-2 priority to High",
-                                key=f"feedback_{card.id}",
+                                key=f"gs_feedback_{card.id}",
                             )
-                            if st.button("🔄 Regenerate", key=f"regen_{card.id}",
+                            if st.button("🔄 Regenerate", key=f"gs_regen_{card.id}",
                                          use_container_width=True):
                                 if feedback.strip():
                                     with st.spinner("Claude is updating test cases…"):
@@ -2053,7 +2053,7 @@ def main():
 
                             if err:
                                 st.error(f"❌ Automation failed: {err}")
-                                if st.button("🔄 Retry", key=f"retry_auto_{card.id}"):
+                                if st.button("🔄 Retry", key=f"gs_retry_auto_{card.id}"):
                                     del st.session_state[auto_key]
                                     st.rerun()
                             else:
@@ -2108,7 +2108,7 @@ def main():
                                 elif branch and not pushed:
                                     col_push, col_rerun = st.columns(2)
                                     with col_push:
-                                        if st.button("🚀 Push to origin", key=f"push_{card.id}", use_container_width=True):
+                                        if st.button("🚀 Push to origin", key=f"gs_push_{card.id}", use_container_width=True):
                                             from pipeline.automation_writer import _push_branch
                                             ok, out = _push_branch(branch)
                                             if ok:
@@ -2118,11 +2118,11 @@ def main():
                                             else:
                                                 st.error(f"Push failed: {out}")
                                     with col_rerun:
-                                        if st.button("🔄 Re-run on different branch", key=f"rerun_auto_{card.id}", use_container_width=True):
+                                        if st.button("🔄 Re-run on different branch", key=f"gs_rerun_auto_{card.id}", use_container_width=True):
                                             del st.session_state[auto_key]
                                             st.rerun()
                                 else:
-                                    if st.button("🔄 Re-run on different branch", key=f"rerun_auto2_{card.id}"):
+                                    if st.button("🔄 Re-run on different branch", key=f"gs_rerun_auto2_{card.id}"):
                                         del st.session_state[auto_key]
                                         st.rerun()
 
@@ -2179,7 +2179,7 @@ def main():
                                         "No scenario for COD payment rejection at checkout"
                                     ),
                                     height=110,
-                                    key=f"retro_ac_{card.id}",
+                                    key=f"gs_retro_ac_{card.id}",
                                     label_visibility="collapsed",
                                 )
 
@@ -2195,7 +2195,7 @@ def main():
                                         "Missing negative TC for when AU Post account is suspended"
                                     ),
                                     height=100,
-                                    key=f"retro_tc_{card.id}",
+                                    key=f"gs_retro_tc_{card.id}",
                                     label_visibility="collapsed",
                                 )
 
@@ -2212,7 +2212,7 @@ def main():
                                         "Missing assertion after rate calculation"
                                     ),
                                     height=100,
-                                    key=f"retro_auto_{card.id}",
+                                    key=f"gs_retro_auto_{card.id}",
                                     label_visibility="collapsed",
                                 )
 
@@ -2228,7 +2228,7 @@ def main():
                                         "Automation selectors were accurate for this feature"
                                     ),
                                     height=80,
-                                    key=f"retro_well_{card.id}",
+                                    key=f"gs_retro_well_{card.id}",
                                     label_visibility="collapsed",
                                 )
 
@@ -2239,7 +2239,7 @@ def main():
                                     value=_notes_default,
                                     placeholder="Any general comment about this card's pipeline run…",
                                     height=70,
-                                    key=f"retro_notes_{card.id}",
+                                    key=f"gs_retro_notes_{card.id}",
                                 )
 
                                 # ── Save button ─────────────────────────
@@ -2247,7 +2247,7 @@ def main():
                                 with _retro_save_col:
                                     if st.button(
                                         "💾 Save & Learn",
-                                        key=f"retro_save_{card.id}",
+                                        key=f"gs_retro_save_{card.id}",
                                         use_container_width=True,
                                         type="primary",
                                     ):
@@ -2331,21 +2331,21 @@ def main():
                                     "Branch",
                                     options=branch_options,
                                     index=default_idx,
-                                    key=f"branch_select_{card.id}",
+                                    key=f"gs_branch_select_{card.id}",
                                     label_visibility="collapsed",
                                 )
                                 if selected_branch == _NEW_BRANCH_OPTION:
                                     auto_branch_input = st.text_input(
                                         "New branch name",
                                         value=default_slug,
-                                        key=f"branch_input_{card.id}",
+                                        key=f"gs_branch_input_{card.id}",
                                         label_visibility="collapsed",
                                     )
                                 else:
                                     auto_branch_input = selected_branch
                             with col_auto:
-                                dry_auto = st.checkbox("Dry run (preview only)", key=f"dry_auto_{card.id}", value=False)
-                                push_auto = st.checkbox("Push to origin after commit", key=f"push_auto_{card.id}")
+                                dry_auto = st.checkbox("Dry run (preview only)", key=f"gs_dry_auto_{card.id}", value=False)
+                                push_auto = st.checkbox("Push to origin after commit", key=f"gs_push_auto_{card.id}")
 
                             # ── Step 5a: Chrome Agent option ──────────────────
                             # Hidden when Smart AC Verifier has already walked the app —
@@ -2361,7 +2361,7 @@ def main():
                                 is_new_feature = det and det.kind == "new"
                                 use_chrome_agent = st.checkbox(
                                     "🌐 Walk app live with Chrome Agent (grounded locators)",
-                                    key=f"use_chrome_{card.id}",
+                                    key=f"gs_use_chrome_{card.id}",
                                     value=is_new_feature,
                                     help=(
                                         "Navigates the real app and captures UI elements. "
@@ -2418,13 +2418,13 @@ def main():
                                         "App path (optional)",
                                         value=chrome_app_path,
                                         placeholder="e.g. settings/additional-services",
-                                        key=f"chrome_path_{card.id}",
+                                        key=f"gs_chrome_path_{card.id}",
                                         label_visibility="collapsed",
                                     )
                                 with col_explore:
                                     if st.button(
                                         "🌐 Explore App",
-                                        key=f"explore_{card.id}",
+                                        key=f"gs_explore_{card.id}",
                                         use_container_width=True,
                                         help="Opens Chrome, walks through the feature, captures real UI elements",
                                     ):
@@ -2457,7 +2457,7 @@ def main():
                             # ── Auto-fix toggle ────────────────────────────────
                             auto_fix_enabled = st.toggle(
                                 "🔄 Auto-run & fix until passing",
-                                key=f"auto_fix_{card.id}",
+                                key=f"gs_auto_fix_{card.id}",
                                 value=False,
                                 help=(
                                     "After writing code, automatically run the tests. "
@@ -2478,7 +2478,7 @@ def main():
                                     else ""
                                 )
                             )
-                            if st.button("⚙️ Write Automation Code", key=f"auto_{card.id}",
+                            if st.button("⚙️ Write Automation Code", key=f"gs_auto_{card.id}",
                                          use_container_width=True,
                                          type="primary"):
                                 from pipeline.automation_writer import write_automation
@@ -2623,7 +2623,7 @@ def main():
                     with col_proc1:
                         if st.button(
                             "➡️ Proceed to Automation",
-                            key=f"proceed_{card.id}",
+                            key=f"rss_proceed_{card.id}",
                             use_container_width=True,
                             type="primary",
                             help="Skip AC + TC generation — use existing and go straight to writing automation",
@@ -2636,14 +2636,14 @@ def main():
                     with col_proc2:
                         if st.button(
                             "📋 View existing TCs",
-                            key=f"view_tc_{card.id}",
+                            key=f"rss_view_tc_{card.id}",
                             use_container_width=True,
                         ):
                             st.session_state[f"show_existing_tc_{card.id}"] = True
                     with col_proc3:
                         if st.button(
                             "🔄 Regenerate",
-                            key=f"banner_regen_{card.id}",
+                            key=f"rss_banner_regen_{card.id}",
                             use_container_width=True,
                             help="Start fresh — will add new rows to Trello + Sheet",
                         ):
@@ -2652,7 +2652,7 @@ def main():
                     if st.session_state.get(f"show_existing_tc_{card.id}"):
                         with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
                             st.markdown(existing_tc_comment)
-                            if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                            if st.button("✖ Close", key=f"rss_close_tc_{card.id}"):
                                 del st.session_state[f"show_existing_tc_{card.id}"]
                                 st.rerun()
 
@@ -2702,7 +2702,7 @@ def main():
                             "App URL",
                             value=st.session_state.get("sav_global_url", _auto_url),
                             placeholder="https://admin.shopify.com/store/yourstore/apps/...",
-                            key=f"sav_global_url_input_{card.id}",
+                            key=f"rss_sav_global_url_input_{card.id}",
                         )
                         if _sav_app_url_global:
                             st.session_state["sav_global_url"] = _sav_app_url_global
@@ -2724,7 +2724,7 @@ def main():
                             "Shopify Email",
                             value=st.session_state.get("shopify_email", _auto_email),
                             placeholder="you@example.com",
-                            key=f"shopify_email_input_{card.id}",
+                            key=f"rss_shopify_email_input_{card.id}",
                         )
                         if _email_val:
                             st.session_state["shopify_email"] = _email_val
@@ -2734,7 +2734,7 @@ def main():
                             value=st.session_state.get("shopify_password", ""),
                             placeholder="••••••••",
                             type="password",
-                            key=f"shopify_password_input_{card.id}",
+                            key=f"rss_shopify_password_input_{card.id}",
                         )
                         if _pass_val:
                             st.session_state["shopify_password"] = _pass_val
@@ -2773,7 +2773,7 @@ def main():
                     "Card complexity",
                     options=list(_COMPLEXITY_MAP.keys()),
                     index=st.session_state.get(_complexity_key + "_idx", 2),
-                    key=f"sav_complexity_radio_{card.id}",
+                    key=f"rss_sav_complexity_radio_{card.id}",
                     horizontal=True,
                     label_visibility="collapsed",
                 )
@@ -2796,7 +2796,7 @@ def main():
                     _is_running       = st.session_state.get(_sav_running_key, False)
                     if _is_running:
                         # Show Stop button while thread is running — replaces Run button
-                        if st.button("⏹ Stop", key=f"stop_sav_{card.id}",
+                        if st.button("⏹ Stop", key=f"rss_stop_sav_{card.id}",
                                      use_container_width=True, type="primary"):
                             st.session_state[_sav_stop_key] = True
                         run_sav = False
@@ -2809,7 +2809,7 @@ def main():
                         )
                         run_sav = st.button(
                             _run_label,
-                            key=f"run_sav_{card.id}",
+                            key=f"rss_run_sav_{card.id}",
                             use_container_width=True,
                             help=(
                                 "Claude opens Chrome, clicks through navigation, "
@@ -2955,7 +2955,7 @@ def main():
                             _rev_is_running  = st.session_state.get(_rev_running_key, False)
 
                             if _rev_is_running:
-                                st.button("⏹ Re-verify running…", key=f"rev_busy_{card.id}",
+                                st.button("⏹ Re-verify running…", key=f"rss_rev_busy_{card.id}",
                                           use_container_width=True, disabled=True)
                                 # Check if thread finished
                                 _rev_res = st.session_state.get(_rev_result_key, {})
@@ -2977,7 +2977,7 @@ def main():
                                     st.rerun()
                             elif st.button(
                                 f"🔁 Re-verify {_failed_count} failed scenario(s)",
-                                key=f"reverify_{card.id}",
+                                key=f"rss_reverify_{card.id}",
                                 help="Re-runs only the failed/partial scenarios — passing ones are kept",
                             ):
                                 from pipeline.smart_ac_verifier import reverify_failed as _rev_fn
@@ -3096,7 +3096,7 @@ def main():
                             st.markdown(f"🤖 *Claude says:* {sv.qa_question}")
                             _ans = st.text_input(
                                 "Your answer",
-                                key=f"sav_qa_input_{card.id}_{_qi}",
+                                key=f"rss_sav_qa_input_{card.id}_{_qi}",
                                 placeholder="e.g. It's under Additional Services → Freight tab",
                             )
                             if _ans.strip():
@@ -3104,7 +3104,7 @@ def main():
 
                         if st.button(
                             "▶ Continue Verification",
-                            key=f"sav_continue_{card.id}",
+                            key=f"rss_sav_continue_{card.id}",
                             type="primary",
                         ):
                             st.session_state[_sav_qa_key] = sav_qa
@@ -3158,13 +3158,13 @@ def main():
                     _dex_q = st.text_input(
                         "Your question",
                         placeholder="e.g. Is this eParcel Extra Cover behavior correct? / Why is the API returning 422?",
-                        key=f"dex_q_{card.id}",
+                        key=f"rss_dex_q_{card.id}",
                         label_visibility="collapsed",
                     )
                 with _dex_col2:
                     _dex_ask = st.button(
                         "Ask 🤖",
-                        key=f"dex_ask_{card.id}",
+                        key=f"rss_dex_ask_{card.id}",
                         use_container_width=True,
                         type="primary",
                     )
@@ -3212,7 +3212,7 @@ def main():
                     if not _last.get("bug_report") or not _last["bug_report"].get("ok"):
                         if st.button(
                             "🐛 This is a Bug — Notify Developer",
-                            key=f"dex_bug_{card.id}",
+                            key=f"rss_dex_bug_{card.id}",
                             help="Send a DM to the developer assigned to this card",
                         ):
                             from pipeline.bug_reporter import notify_devs_of_bug
@@ -3229,7 +3229,7 @@ def main():
                             st.session_state[_dex_hist_key] = _dex_history
                             st.rerun()
 
-                if _dex_history and st.button("🗑 Clear conversation", key=f"dex_clear_{card.id}"):
+                if _dex_history and st.button("🗑 Clear conversation", key=f"rss_dex_clear_{card.id}"):
                     from pipeline.dex_history import clear_history as _clear_dex
                     _clear_dex(card.id)
                     st.session_state[_dex_hist_key] = []
@@ -3301,7 +3301,7 @@ def main():
                         with col_proc1:
                             if st.button(
                                 "➡️ Proceed to Automation",
-                                key=f"proceed_{card.id}",
+                                key=f"wa_proceed_{card.id}",
                                 use_container_width=True,
                                 type="primary",
                                 help="Skip AC + TC generation — use existing and go straight to writing automation",
@@ -3314,14 +3314,14 @@ def main():
                         with col_proc2:
                             if st.button(
                                 "📋 View existing TCs",
-                                key=f"view_tc_{card.id}",
+                                key=f"wa_view_tc_{card.id}",
                                 use_container_width=True,
                             ):
                                 st.session_state[f"show_existing_tc_{card.id}"] = True
                         with col_proc3:
                             if st.button(
                                 "🔄 Regenerate",
-                                key=f"banner_regen_{card.id}",
+                                key=f"wa_banner_regen_{card.id}",
                                 use_container_width=True,
                                 help="Start fresh — will add new rows to Trello + Sheet",
                             ):
@@ -3330,7 +3330,7 @@ def main():
                         if st.session_state.get(f"show_existing_tc_{card.id}"):
                             with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
                                 st.markdown(existing_tc_comment)
-                                if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                                if st.button("✖ Close", key=f"wa_close_tc_{card.id}"):
                                     del st.session_state[f"show_existing_tc_{card.id}"]
                                     st.rerun()
 
@@ -3348,7 +3348,7 @@ def main():
                                    "You can still generate if you want to proceed.")
 
                     if card.id not in tc_store:
-                        if st.button("🤖 Generate Test Cases", key=f"gen_{card.id}",
+                        if st.button("🤖 Generate Test Cases", key=f"wa_gen_{card.id}",
                                      type="primary" if (not vr or vr.overall_status == "PASS") else "secondary"):
                             with st.spinner("Claude is writing test cases…"):
                                 tc_store[card.id] = generate_test_cases(card)
@@ -3366,13 +3366,13 @@ def main():
 
                         if st.session_state.get(_tc_dm_sent_key):
                             st.success("✅ Test cases sent via Slack DM!")
-                            if st.button("📨 Send again", key=f"tc_dm_resend_{card.id}"):
+                            if st.button("📨 Send again", key=f"wa_tc_dm_resend_{card.id}"):
                                 st.session_state[_tc_dm_sent_key] = False
                                 st.session_state[_tc_dm_open_key] = True
                                 st.rerun()
                         elif st.session_state.get(_tc_ch_sent_key):
                             st.success("✅ Test cases posted to Slack channel!")
-                            if st.button("📢 Post again", key=f"tc_ch_resend_{card.id}"):
+                            if st.button("📢 Post again", key=f"wa_tc_ch_resend_{card.id}"):
                                 st.session_state[_tc_ch_sent_key] = False
                                 st.session_state[_tc_ch_open_key] = True
                                 st.rerun()
@@ -3381,7 +3381,7 @@ def main():
                             with _tc_btn_col1:
                                 if st.button(
                                     "📨 Send Test Cases via Slack DM",
-                                    key=f"open_dm_tc_{card.id}",
+                                    key=f"wa_open_dm_tc_{card.id}",
                                     use_container_width=True,
                                 ):
                                     st.session_state[_tc_dm_open_key] = True
@@ -3389,7 +3389,7 @@ def main():
                             with _tc_btn_col2:
                                 if st.button(
                                     "📢 Send to Slack Channel",
-                                    key=f"open_ch_tc_{card.id}",
+                                    key=f"wa_open_ch_tc_{card.id}",
                                     use_container_width=True,
                                 ):
                                     st.session_state[_tc_ch_open_key] = True
@@ -3432,18 +3432,18 @@ def main():
                                         _tc_ch_sel = st.selectbox(
                                             "Select channel",
                                             options=list(_ch_options.keys()),
-                                            key=f"tc_ch_select_{card.id}",
+                                            key=f"wa_tc_ch_select_{card.id}",
                                         )
                                     with _tc_ch_ref_col:
                                         st.markdown("<br>", unsafe_allow_html=True)
-                                        if st.button("🔄 Refresh", key=f"tc_ch_refresh_{card.id}",
+                                        if st.button("🔄 Refresh", key=f"wa_tc_ch_refresh_{card.id}",
                                                      use_container_width=True):
                                             del st.session_state[_ch_cache_key]
                                             st.rerun()
 
                                     if st.button(
                                         f"📢 Post to {_tc_ch_sel}",
-                                        key=f"tc_ch_send_btn_{card.id}",
+                                        key=f"wa_tc_ch_send_btn_{card.id}",
                                         type="primary",
                                         use_container_width=True,
                                     ):
@@ -3480,13 +3480,13 @@ def main():
                                     _tc_dm_query = st.text_input(
                                         "Search member",
                                         placeholder="Search by name — add multiple one by one",
-                                        key=f"tc_dm_search_query_{card.id}",
+                                        key=f"wa_tc_dm_search_query_{card.id}",
                                     )
                                 with _tc_dm_col2:
                                     st.markdown("<br>", unsafe_allow_html=True)
                                     _tc_do_search = st.button(
                                         "🔍 Search",
-                                        key=f"tc_dm_search_btn_{card.id}",
+                                        key=f"wa_tc_dm_search_btn_{card.id}",
                                         use_container_width=True,
                                     )
 
@@ -3516,17 +3516,17 @@ def main():
                                     _tc_selected_labels = st.multiselect(
                                         "Select recipients (pick multiple)",
                                         options=list(_tc_pool.keys()),
-                                        key=f"tc_dm_user_multi_{card.id}",
+                                        key=f"wa_tc_dm_user_multi_{card.id}",
                                     )
                                     if st.button("✖ Clear search results",
-                                                 key=f"tc_dm_clear_{card.id}"):
+                                                 key=f"wa_tc_dm_clear_{card.id}"):
                                         st.session_state[_tc_pool_key] = {}
                                         st.rerun()
 
                                     if st.session_state.get(_tc_dm_sent_key):
                                         st.success("✅ Test cases sent via Slack DM!")
                                         if st.button("📨 Send again",
-                                                     key=f"tc_dm_resend_inner_{card.id}"):
+                                                     key=f"wa_tc_dm_resend_inner_{card.id}"):
                                             st.session_state[_tc_dm_sent_key] = False
                                             st.rerun()
                                     elif _tc_selected_labels:
@@ -3534,7 +3534,7 @@ def main():
                                         _tc_n = len(_tc_selected_uids)
                                         if st.button(
                                             f"📨 Send to {_tc_n} person{'s' if _tc_n > 1 else ''}",
-                                            key=f"tc_dm_send_btn_{card.id}",
+                                            key=f"wa_tc_dm_send_btn_{card.id}",
                                             type="primary",
                                             use_container_width=True,
                                         ):
@@ -3597,7 +3597,7 @@ def main():
                                         "📊 Add to sheet tab",
                                         tab_options,
                                         index=tab_idx,
-                                        key=f"tab_{card.id}",
+                                        key=f"wa_tab_{card.id}",
                                     )
                                 with _tc_col2:
                                     _new_tab_name = st.text_input(
@@ -3606,7 +3606,7 @@ def main():
                                         key=_new_tab_key,
                                         label_visibility="collapsed",
                                     )
-                                    if st.button("➕ Create Tab", key=f"create_tab_{card.id}",
+                                    if st.button("➕ Create Tab", key=f"wa_create_tab_{card.id}",
                                                  use_container_width=True):
                                         if _new_tab_name.strip():
                                             from pipeline.sheets_writer import create_new_tab
@@ -3649,7 +3649,7 @@ def main():
                                                    "Use 'Skip duplicates' to only write non-duplicate TCs.")
                                     force_write = st.checkbox(
                                         "Skip duplicate TCs (only add new ones)",
-                                        key=f"skip_dups_{card.id}",
+                                        key=f"wa_skip_dups_{card.id}",
                                     )
                                 else:
                                     force_write = False
@@ -3661,7 +3661,7 @@ def main():
                             col_approve, col_edit = st.columns([1, 2])
 
                             with col_approve:
-                                if st.button("✅ Approve & Save", key=f"approve_{card.id}",
+                                if st.button("✅ Approve & Save", key=f"wa_approve_{card.id}",
                                              use_container_width=True, type="primary"):
                                     trello = TrelloClient(board_id=st.session_state.get("selected_board_id") or None)
 
@@ -3765,9 +3765,9 @@ def main():
                                 feedback = st.text_input(
                                     "✏️ Request changes",
                                     placeholder="e.g. Add a test case for Saturday delivery, change TC-2 priority to High",
-                                    key=f"feedback_{card.id}",
+                                    key=f"wa_feedback_{card.id}",
                                 )
-                                if st.button("🔄 Regenerate", key=f"regen_{card.id}",
+                                if st.button("🔄 Regenerate", key=f"wa_regen_{card.id}",
                                              use_container_width=True):
                                     if feedback.strip():
                                         with st.spinner("Claude is updating test cases…"):
@@ -3795,7 +3795,7 @@ def main():
 
                                 if err:
                                     st.error(f"❌ Automation failed: {err}")
-                                    if st.button("🔄 Retry", key=f"retry_auto_{card.id}"):
+                                    if st.button("🔄 Retry", key=f"wa_retry_auto_{card.id}"):
                                         del st.session_state[auto_key]
                                         st.rerun()
                                 else:
@@ -3850,7 +3850,7 @@ def main():
                                     elif branch and not pushed:
                                         col_push, col_rerun = st.columns(2)
                                         with col_push:
-                                            if st.button("🚀 Push to origin", key=f"push_{card.id}", use_container_width=True):
+                                            if st.button("🚀 Push to origin", key=f"wa_push_{card.id}", use_container_width=True):
                                                 from pipeline.automation_writer import _push_branch
                                                 ok, out = _push_branch(branch)
                                                 if ok:
@@ -3860,11 +3860,11 @@ def main():
                                                 else:
                                                     st.error(f"Push failed: {out}")
                                         with col_rerun:
-                                            if st.button("🔄 Re-run on different branch", key=f"rerun_auto_{card.id}", use_container_width=True):
+                                            if st.button("🔄 Re-run on different branch", key=f"wa_rerun_auto_{card.id}", use_container_width=True):
                                                 del st.session_state[auto_key]
                                                 st.rerun()
                                     else:
-                                        if st.button("🔄 Re-run on different branch", key=f"rerun_auto2_{card.id}"):
+                                        if st.button("🔄 Re-run on different branch", key=f"wa_rerun_auto2_{card.id}"):
                                             del st.session_state[auto_key]
                                             st.rerun()
 
@@ -3921,7 +3921,7 @@ def main():
                                             "No scenario for COD payment rejection at checkout"
                                         ),
                                         height=110,
-                                        key=f"retro_ac_{card.id}",
+                                        key=f"wa_retro_ac_{card.id}",
                                         label_visibility="collapsed",
                                     )
 
@@ -3937,7 +3937,7 @@ def main():
                                             "Missing negative TC for when AU Post account is suspended"
                                         ),
                                         height=100,
-                                        key=f"retro_tc_{card.id}",
+                                        key=f"wa_retro_tc_{card.id}",
                                         label_visibility="collapsed",
                                     )
 
@@ -3954,7 +3954,7 @@ def main():
                                             "Missing assertion after rate calculation"
                                         ),
                                         height=100,
-                                        key=f"retro_auto_{card.id}",
+                                        key=f"wa_retro_auto_{card.id}",
                                         label_visibility="collapsed",
                                     )
 
@@ -3970,7 +3970,7 @@ def main():
                                             "Automation selectors were accurate for this feature"
                                         ),
                                         height=80,
-                                        key=f"retro_well_{card.id}",
+                                        key=f"wa_retro_well_{card.id}",
                                         label_visibility="collapsed",
                                     )
 
@@ -3981,7 +3981,7 @@ def main():
                                         value=_notes_default,
                                         placeholder="Any general comment about this card's pipeline run…",
                                         height=70,
-                                        key=f"retro_notes_{card.id}",
+                                        key=f"wa_retro_notes_{card.id}",
                                     )
 
                                     # ── Save button ─────────────────────────
@@ -3989,7 +3989,7 @@ def main():
                                     with _retro_save_col:
                                         if st.button(
                                             "💾 Save & Learn",
-                                            key=f"retro_save_{card.id}",
+                                            key=f"wa_retro_save_{card.id}",
                                             use_container_width=True,
                                             type="primary",
                                         ):
@@ -4073,21 +4073,21 @@ def main():
                                         "Branch",
                                         options=branch_options,
                                         index=default_idx,
-                                        key=f"branch_select_{card.id}",
+                                        key=f"wa_branch_select_{card.id}",
                                         label_visibility="collapsed",
                                     )
                                     if selected_branch == _NEW_BRANCH_OPTION:
                                         auto_branch_input = st.text_input(
                                             "New branch name",
                                             value=default_slug,
-                                            key=f"branch_input_{card.id}",
+                                            key=f"wa_branch_input_{card.id}",
                                             label_visibility="collapsed",
                                         )
                                     else:
                                         auto_branch_input = selected_branch
                                 with col_auto:
-                                    dry_auto = st.checkbox("Dry run (preview only)", key=f"dry_auto_{card.id}", value=False)
-                                    push_auto = st.checkbox("Push to origin after commit", key=f"push_auto_{card.id}")
+                                    dry_auto = st.checkbox("Dry run (preview only)", key=f"wa_dry_auto_{card.id}", value=False)
+                                    push_auto = st.checkbox("Push to origin after commit", key=f"wa_push_auto_{card.id}")
 
                                 # ── Step 5a: Chrome Agent option ──────────────────
                                 # Hidden when Smart AC Verifier has already walked the app —
@@ -4103,7 +4103,7 @@ def main():
                                     is_new_feature = det and det.kind == "new"
                                     use_chrome_agent = st.checkbox(
                                         "🌐 Walk app live with Chrome Agent (grounded locators)",
-                                        key=f"use_chrome_{card.id}",
+                                        key=f"wa_use_chrome_{card.id}",
                                         value=is_new_feature,
                                         help=(
                                             "Navigates the real app and captures UI elements. "
@@ -4160,13 +4160,13 @@ def main():
                                             "App path (optional)",
                                             value=chrome_app_path,
                                             placeholder="e.g. settings/additional-services",
-                                            key=f"chrome_path_{card.id}",
+                                            key=f"wa_chrome_path_{card.id}",
                                             label_visibility="collapsed",
                                         )
                                     with col_explore:
                                         if st.button(
                                             "🌐 Explore App",
-                                            key=f"explore_{card.id}",
+                                            key=f"wa_explore_{card.id}",
                                             use_container_width=True,
                                             help="Opens Chrome, walks through the feature, captures real UI elements",
                                         ):
@@ -4199,7 +4199,7 @@ def main():
                                 # ── Auto-fix toggle ────────────────────────────────
                                 auto_fix_enabled = st.toggle(
                                     "🔄 Auto-run & fix until passing",
-                                    key=f"auto_fix_{card.id}",
+                                    key=f"wa_auto_fix_{card.id}",
                                     value=False,
                                     help=(
                                         "After writing code, automatically run the tests. "
@@ -4220,7 +4220,7 @@ def main():
                                         else ""
                                     )
                                 )
-                                if st.button("⚙️ Write Automation Code", key=f"auto_{card.id}",
+                                if st.button("⚙️ Write Automation Code", key=f"wa_auto_{card.id}",
                                              use_container_width=True,
                                              type="primary"):
                                     from pipeline.automation_writer import write_automation
@@ -4690,7 +4690,7 @@ def main():
                     with col_proc1:
                         if st.button(
                             "➡️ Proceed to Automation",
-                            key=f"proceed_{card.id}",
+                            key=f"gd_proceed_{card.id}",
                             use_container_width=True,
                             type="primary",
                             help="Skip AC + TC generation — use existing and go straight to writing automation",
@@ -4703,14 +4703,14 @@ def main():
                     with col_proc2:
                         if st.button(
                             "📋 View existing TCs",
-                            key=f"view_tc_{card.id}",
+                            key=f"gd_view_tc_{card.id}",
                             use_container_width=True,
                         ):
                             st.session_state[f"show_existing_tc_{card.id}"] = True
                     with col_proc3:
                         if st.button(
                             "🔄 Regenerate",
-                            key=f"banner_regen_{card.id}",
+                            key=f"gd_banner_regen_{card.id}",
                             use_container_width=True,
                             help="Start fresh — will add new rows to Trello + Sheet",
                         ):
@@ -4719,7 +4719,7 @@ def main():
                     if st.session_state.get(f"show_existing_tc_{card.id}"):
                         with st.expander("📋 Existing test cases (from Trello comment)", expanded=True):
                             st.markdown(existing_tc_comment)
-                            if st.button("✖ Close", key=f"close_tc_{card.id}"):
+                            if st.button("✖ Close", key=f"gd_close_tc_{card.id}"):
                                 del st.session_state[f"show_existing_tc_{card.id}"]
                                 st.rerun()
 
@@ -4750,18 +4750,18 @@ def main():
                                 data=_bf.read(),
                                 file_name=Path(_biz_path).name,
                                 mime="application/pdf",
-                                key=f"dl_biz_{card.id}",
+                                key=f"gd_dl_biz_{card.id}",
                                 use_container_width=True,
                             )
                         st.caption(f"📁 `{_biz_path}`")
-                        if st.button("🔁 Regenerate", key=f"regen_biz_{card.id}",
+                        if st.button("🔁 Regenerate", key=f"gd_regen_biz_{card.id}",
                                      use_container_width=True):
                             del st.session_state[_biz_key]
                             st.rerun()
                     else:
                         if st.button(
                             "📄 Generate Business Document",
-                            key=f"gen_biz_{card.id}",
+                            key=f"gd_gen_biz_{card.id}",
                             use_container_width=True,
                             help="Business pitch PDF — merchant scenarios, benefits, problem statement",
                         ):
@@ -4793,18 +4793,18 @@ def main():
                                 data=_df.read(),
                                 file_name=Path(_det_path).name,
                                 mime="application/pdf",
-                                key=f"dl_det_{card.id}",
+                                key=f"gd_dl_det_{card.id}",
                                 use_container_width=True,
                             )
                         st.caption(f"📁 `{_det_path}`")
-                        if st.button("🔁 Regenerate", key=f"regen_det_{card.id}",
+                        if st.button("🔁 Regenerate", key=f"gd_regen_det_{card.id}",
                                      use_container_width=True):
                             del st.session_state[_det_key]
                             st.rerun()
                     else:
                         if st.button(
                             "📊 Generate Detailed Report",
-                            key=f"gen_det_{card.id}",
+                            key=f"gd_gen_det_{card.id}",
                             use_container_width=True,
                             help="Full QA report — training guide, all test cases, AC sign-off, QA notes",
                         ):
