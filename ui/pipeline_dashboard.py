@@ -1525,6 +1525,7 @@ def main():
                             "🟡 Medium  (3-4 scenarios · ~$1.20 · ~6 min)":  4,
                             "🔴 Complex (4-5 scenarios · ~$1.50 · ~8 min)":  5,
                             "⚫ All scenarios (full run)":                    None,
+                            "🎯 Specific scenario (textbox above)":           -1,
                         }
                         _complexity_key = f"sav_complexity_{card.id}"
                         _complexity_choice = st.radio(
@@ -1537,6 +1538,7 @@ def main():
                         )
                         st.session_state[_complexity_key] = _COMPLEXITY_MAP[_complexity_choice]
                         st.session_state[_complexity_key + "_idx"] = list(_COMPLEXITY_MAP.keys()).index(_complexity_choice)
+                        _specific_sc_mode = _COMPLEXITY_MAP[_complexity_choice] == -1
 
                         sav_url = _global_url_override or _auto_url
                         col_sav1, col_sav2 = st.columns([2, 3])
@@ -1558,7 +1560,7 @@ def main():
                                     st.session_state[_sav_stop_key] = True
                                 run_sav = False
                             else:
-                                _custom_active = bool(st.session_state.get(_custom_sc_key, "").strip())
+                                _custom_active = _specific_sc_mode or bool(st.session_state.get(_custom_sc_key, "").strip())
                                 _run_label = (
                                     "🎯 Run This Scenario" if _custom_active
                                     else "🔁 Re-verify" if sav_report
@@ -1612,8 +1614,12 @@ def main():
                                 from pipeline.smart_ac_verifier import verify_ac as _verify_ac_fn
 
                                 _custom_sc_val = st.session_state.get(_custom_sc_key, "").strip()
-                                _ac_text     = _custom_sc_val if _custom_sc_val else (card.desc or "")
-                                _sc_count    = 1 if _custom_sc_val else max(1, sum(
+                                _use_custom = _specific_sc_mode or bool(_custom_sc_val)
+                                if _use_custom and not _custom_sc_val:
+                                    st.warning("⚠️ 'Specific scenario' mode selected but textbox is empty — add a scenario above.")
+                                    run_sav = False
+                                _ac_text     = _custom_sc_val if _use_custom else (card.desc or "")
+                                _sc_count    = 1 if _use_custom else max(1, sum(
                                     1 for ln in _ac_text.splitlines()
                                     if ln.strip().startswith(("Given","When","Scenario","Then","-"))
                                 ))
@@ -1626,7 +1632,7 @@ def main():
                                 _rk  = _sav_result_key
                                 _pk  = _sav_prog_key
                                 _sk  = _sav_stop_key
-                                _max_sc = 1 if _custom_sc_val else st.session_state.get(_complexity_key)
+                                _max_sc = 1 if _use_custom else st.session_state.get(_complexity_key)
                                 _sh_email = st.session_state.get("shopify_email", "")
                                 _sh_pass  = st.session_state.get("shopify_password", "")
 
