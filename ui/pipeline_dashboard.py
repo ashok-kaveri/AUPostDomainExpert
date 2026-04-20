@@ -382,7 +382,12 @@ def main():
         os.getenv("SLACK_WEBHOOK_URL", "").strip()
         or (os.getenv("SLACK_BOT_TOKEN", "").strip() and os.getenv("SLACK_CHANNEL", "").strip())
     )
-    sheets_ok = bool(os.path.exists(config.GOOGLE_CREDENTIALS_PATH))
+    sheets_ok = bool(
+        os.getenv("EPARCEL_SHEETS_ID", "").strip()
+        or os.getenv("MYPOST_SHEETS_ID", "").strip()
+        or getattr(config, "EPARCEL_SHEETS_ID", "")
+        or getattr(config, "MYPOST_SHEETS_ID", "")
+    )
 
     # ── Page header ────────────────────────────────────────────────────────
     current_release = st.session_state.get("rqa_release", "")
@@ -404,7 +409,7 @@ def main():
             _status_badge("Claude API", api_ok, "Set ANTHROPIC_API_KEY") +
             _status_badge("Trello", trello_ok, "Set TRELLO_* in .env") +
             _status_badge("Slack", slack_ok, "Set SLACK_WEBHOOK_URL") +
-            _status_badge("Google Sheets", sheets_ok, "Add credentials.json") +
+            _status_badge("Google Sheets", sheets_ok, "Set EPARCEL_SHEETS_ID / MYPOST_SHEETS_ID") +
             _status_badge("Ollama Embeddings", True),
             unsafe_allow_html=True,
         )
