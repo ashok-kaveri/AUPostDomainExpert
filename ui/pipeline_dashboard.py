@@ -1140,305 +1140,305 @@ def main():
                                         del st.session_state[f"show_existing_tc_{card.id}"]
                                         st.rerun()
 
-                        # Skip pipeline steps for already-done cards unless Regenerate chosen
-                        if (already_done and not is_approved
-                                and not st.session_state.get(f"force_regen_{card.id}", False)):
-                            continue
+                        # For already-processed cards: skip AC/TC steps, show only SAV
+                        _processed_only = (already_done and not is_approved
+                                and not st.session_state.get(f"force_regen_{card.id}", False))
 
-                        # ── STEP 1: Card Description ──────────────────────
-                        _step_header("1", "Card Requirements")
-                        if card.desc:
-                            st.markdown(card.desc[:600] + ("…" if len(card.desc) > 600 else ""))
-                        else:
-                            st.caption("_(No description on this card)_")
-
-                        # ── STEP 1b: AI Suggest User Story + AC ───────────
-                        _step_header("1b", "AI Suggested User Story & AC")
-                        ac_suggest_key = f"ac_suggestion_{card.id}"
-                        ac_saved_key   = f"ac_saved_{card.id}"
-                        ac_suggestion  = st.session_state.get(ac_suggest_key)
-                        ac_saved       = st.session_state.get(ac_saved_key, False)
-
-                        if ac_saved:
-                            st.success("✅ AI-generated AC saved to Trello description")
-                        elif ac_suggestion:
-                            st.markdown(ac_suggestion)
-                            col_save_ac, col_comment_ac, col_skip_ac, col_dm_ac, col_ch_ac = st.columns(5)
-                            with col_save_ac:
-                                if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
-                                             use_container_width=True, type="primary"):
-                                    with st.spinner("Updating Trello description…"):
-                                        TrelloClient(board_id=st.session_state.get("selected_board_id") or None).update_card_description(card.id, ac_suggestion)
-                                        card.desc = ac_suggestion
-                                    st.session_state[ac_saved_key] = True
-                                    st.rerun()
-                            with col_comment_ac:
-                                if st.button("💬 Add to Trello Comment", key=f"comment_ac_{card.id}",
-                                             use_container_width=True):
-                                    with st.spinner("Adding comment to Trello card…"):
-                                        TrelloClient(board_id=st.session_state.get("selected_board_id") or None).add_comment(card.id, ac_suggestion)
-                                    st.success("✅ AC added as Trello comment")
-                            with col_skip_ac:
-                                if st.button("⏭️ Skip — Keep Existing", key=f"skip_ac_{card.id}",
-                                             use_container_width=True):
-                                    st.session_state[ac_saved_key] = True  # mark done so it collapses
-                                    st.rerun()
-                            with col_dm_ac:
-                                if st.button("📨 Send via Slack DM", key=f"open_dm_ac_{card.id}",
-                                             use_container_width=True):
-                                    st.session_state[f"show_dm_ac_{card.id}"] = True
-                                    st.session_state[f"show_ch_ac_{card.id}"] = False
-                            with col_ch_ac:
-                                if st.button("📢 Send to Channel", key=f"open_ch_ac_{card.id}",
-                                             use_container_width=True):
-                                    st.session_state[f"show_ch_ac_{card.id}"] = True
-                                    st.session_state[f"show_dm_ac_{card.id}"] = False
-
-                            # ── Slack Channel panel (AC) ────────────────────
-                            if st.session_state.get(f"show_ch_ac_{card.id}"):
-                                from pipeline.slack_client import (
-                                    dm_token_configured, list_slack_channels,
-                                    post_content_to_slack_channel,
-                                )
-                                if not dm_token_configured():
-                                    st.warning(
-                                        "⚠️ SLACK_BOT_TOKEN is not set — channel posting requires a bot token.\n\n"
-                                        "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
-                                    )
-                                else:
-                                    st.markdown("##### 📢 Post AC to Slack Channel")
-                                    _ch_cache_key = "slack_channels_cache"
-                                    if _ch_cache_key not in st.session_state:
-                                        with st.spinner("Loading channels…"):
-                                            _chs, _ch_err, _ch_note = list_slack_channels()
-                                        if _ch_err:
-                                            st.error(f"❌ {_ch_err}")
-                                            _chs = []
-                                        st.session_state[_ch_cache_key] = (_chs, _ch_note)
-                                    else:
-                                        _chs, _ch_note = st.session_state[_ch_cache_key]
-
-                                    if _ch_note:
-                                        st.caption(f"ℹ️ {_ch_note}")
-
-                                    if _chs:
-                                        _ch_options = {
-                                            f"{'🔒' if c['is_private'] else '#'} {c['name']}": c["id"]
-                                            for c in _chs
-                                        }
-                                        _ac_ch_sel_col, _ac_ch_ref_col = st.columns([3, 1])
-                                        with _ac_ch_sel_col:
-                                            _ac_ch_sel = st.selectbox(
-                                                "Select channel",
-                                                options=list(_ch_options.keys()),
-                                                key=f"ac_ch_select_{card.id}",
-                                            )
-                                        with _ac_ch_ref_col:
-                                            st.markdown("<br>", unsafe_allow_html=True)
-                                            if st.button("🔄 Refresh", key=f"ac_ch_refresh_{card.id}",
-                                                         use_container_width=True):
-                                                del st.session_state[_ch_cache_key]
-                                                st.rerun()
-
-                                        _ac_ch_sent_key = f"ac_ch_sent_{card.id}"
-                                        if st.session_state.get(_ac_ch_sent_key):
-                                            st.success("✅ AC posted to channel!")
-                                            if st.button("📢 Post again", key=f"ac_ch_resend_{card.id}"):
-                                                st.session_state[_ac_ch_sent_key] = False
-                                                st.rerun()
-                                        else:
-                                            if st.button(
-                                                f"📢 Post to {_ac_ch_sel}",
-                                                key=f"ac_ch_send_btn_{card.id}",
-                                                type="primary",
-                                                use_container_width=True,
-                                            ):
-                                                _sel_ch_id = _ch_options[_ac_ch_sel]
-                                                with st.spinner("Posting to channel…"):
-                                                    _ch_result = post_content_to_slack_channel(
-                                                        channel_id=_sel_ch_id,
-                                                        card_name=card.name,
-                                                        content_text=ac_suggestion,
-                                                        content_label="Acceptance Criteria",
-                                                        card_url=getattr(card, "url", ""),
-                                                    )
-                                                if _ch_result["ok"]:
-                                                    st.session_state[_ac_ch_sent_key] = True
-                                                    st.rerun()
-                                                else:
-                                                    st.error(f"❌ {_ch_result['error']}")
-
-                            # ── Slack DM panel (AC) ─────────────────────────
-                            if st.session_state.get(f"show_dm_ac_{card.id}"):
-                                from pipeline.slack_client import (
-                                    dm_token_configured, search_slack_users, send_ac_dm,
-                                )
-                                if not dm_token_configured():
-                                    st.warning(
-                                        "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
-                                        "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
-                                    )
-                                else:
-                                    st.markdown("##### 📨 Send AC via Slack DM")
-                                    # ── Search row ───────────────────────────
-                                    _dm_col1, _dm_col2 = st.columns([3, 1])
-                                    with _dm_col1:
-                                        _dm_query = st.text_input(
-                                            "Search member",
-                                            placeholder="Search by name — add multiple one by one",
-                                            key=f"dm_search_query_{card.id}",
-                                        )
-                                    with _dm_col2:
-                                        st.markdown("<br>", unsafe_allow_html=True)
-                                        _do_search = st.button(
-                                            "🔍 Search",
-                                            key=f"dm_search_btn_{card.id}",
-                                            use_container_width=True,
-                                        )
-
-                                    # Accumulated user pool (across multiple searches)
-                                    _pool_key = f"dm_user_pool_{card.id}"
-                                    if _pool_key not in st.session_state:
-                                        st.session_state[_pool_key] = {}  # {label: id}
-
-                                    if _do_search and _dm_query.strip():
-                                        with st.spinner("Searching…"):
-                                            _raw = search_slack_users(_dm_query.strip())
-                                        _found, _search_err = (_raw if isinstance(_raw, tuple)
-                                                               else (_raw or [], ""))
-                                        if _search_err:
-                                            st.error(f"❌ {_search_err}")
-                                        elif not _found:
-                                            st.info("No users found — try a different name.")
-                                        else:
-                                            # Merge into pool
-                                            for u in _found:
-                                                _lbl = f"{u['name']} (@{u['display_name']})"
-                                                st.session_state[_pool_key][_lbl] = u["id"]
-                                            st.success(f"Found {len(_found)} user(s) — select below.")
-
-                                    _pool = st.session_state[_pool_key]
-                                    if _pool:
-                                        _selected_labels = st.multiselect(
-                                            "Select recipients (pick multiple)",
-                                            options=list(_pool.keys()),
-                                            key=f"dm_user_multi_{card.id}",
-                                        )
-                                        # Clear pool button
-                                        if st.button("✖ Clear search results",
-                                                     key=f"dm_clear_{card.id}"):
-                                            st.session_state[_pool_key] = {}
-                                            st.rerun()
-
-                                        _dm_sent_key = f"ac_dm_sent_{card.id}"
-                                        if st.session_state.get(_dm_sent_key):
-                                            st.success("✅ AC sent via Slack DM!")
-                                            if st.button("📨 Send again",
-                                                         key=f"dm_resend_{card.id}"):
-                                                st.session_state[_dm_sent_key] = False
-                                                st.rerun()
-                                        elif _selected_labels:
-                                            _selected_uids = [_pool[l] for l in _selected_labels]
-                                            _n = len(_selected_uids)
-                                            if st.button(
-                                                f"📨 Send to {_n} person{'s' if _n > 1 else ''}",
-                                                key=f"dm_send_btn_{card.id}",
-                                                type="primary",
-                                                use_container_width=True,
-                                            ):
-                                                with st.spinner(f"Sending DM to {_n} recipient(s)…"):
-                                                    _dm_result = send_ac_dm(
-                                                        user_ids=_selected_uids,
-                                                        card_name=card.name,
-                                                        ac_text=ac_suggestion,
-                                                        content_label="Acceptance Criteria",
-                                                    )
-                                                if _dm_result["ok"]:
-                                                    st.session_state[_dm_sent_key] = True
-                                                    st.rerun()
-                                                else:
-                                                    _s, _f = _dm_result.get("sent",0), _dm_result.get("failed",0)
-                                                    if _s:
-                                                        st.warning(f"⚠️ Sent to {_s}, failed for {_f}: {_dm_result['error']}")
-                                                    else:
-                                                        st.error(f"❌ DM failed: {_dm_result['error']}")
-                                        else:
-                                            st.caption("Select at least one recipient above.")
-                        else:
-                            if st.button("🤖 Generate User Story & AC", key=f"gen_ac_{card.id}"):
-                                from pipeline.card_processor import generate_acceptance_criteria
-                                raw = f"{card.name}\n\n{card.desc or ''}".strip()
-                                with st.spinner("Claude is generating User Story & AC…"):
-                                    st.session_state[ac_suggest_key] = generate_acceptance_criteria(
-                                        raw,
-                                        attachments=card.attachments,
-                                        checklists=card.checklists,
-                                    )
-                                st.rerun()
-
-                        # ── STEP 2: Domain Expert Validation ──────────────
-                        _step_header("2", "Domain Expert Validation")
-                        val_key = f"validation_{card.id}"
-
-                        if vr:
-                            status_color = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
-                                vr.overall_status, "⚪"
-                            )
-                            st.markdown(f"{status_color} **{vr.overall_status}** — {vr.summary}")
-
-                            # KB insights
-                            if vr.kb_insights:
-                                with st.expander("📚 Knowledge Base context", expanded=False):
-                                    st.markdown(vr.kb_insights)
-                                    if vr.sources:
-                                        st.caption("Sources: " + " · ".join(
-                                            f"[link]({s})" if s.startswith("http") else s
-                                            for s in vr.sources[:4]
-                                        ))
-
-                            # Issues grid
-                            has_issues = any([vr.requirement_gaps, vr.ac_gaps,
-                                              vr.accuracy_issues, vr.suggestions])
-                            if has_issues:
-                                c1, c2 = st.columns(2)
-                                with c1:
-                                    if vr.accuracy_issues:
-                                        st.error("**❌ Accuracy Issues**")
-                                        for issue in vr.accuracy_issues:
-                                            st.markdown(f"- {issue}")
-                                    if vr.requirement_gaps:
-                                        st.warning("**⚠️ Requirement Gaps**")
-                                        for gap in vr.requirement_gaps:
-                                            st.markdown(f"- {gap}")
-                                with c2:
-                                    if vr.ac_gaps:
-                                        st.warning("**📋 Missing AC Scenarios**")
-                                        for gap in vr.ac_gaps:
-                                            st.markdown(f"- {gap}")
-                                    if vr.suggestions:
-                                        st.info("**💡 Suggestions**")
-                                        for s in vr.suggestions:
-                                            st.markdown(f"- {s}")
-
-                                # Fix + Re-validate
-                                st.caption("👆 Fix the card on Trello, then re-validate below")
-                                if st.button("🔄 Re-validate after fix", key=f"reval_{card.id}"):
-                                    # Refresh card from Trello + re-run validation
-                                    with st.spinner("Fetching updated card from Trello…"):
-                                        fresh = TrelloClient(board_id=st.session_state.get("selected_board_id") or None).get_card(card.id)
-                                    with st.spinner("Re-validating…"):
-                                        st.session_state[val_key] = validate_card(
-                                            card_name=fresh.name,
-                                            card_desc=fresh.desc or "",
-                                            acceptance_criteria=fresh.desc or "",
-                                        )
-                                        # Update stored card desc too
-                                        card.desc = fresh.desc
-                                    st.rerun()
+                        if not _processed_only:
+                            # ── STEP 1: Card Description ──────────────────────
+                            _step_header("1", "Card Requirements")
+                            if card.desc:
+                                st.markdown(card.desc[:600] + ("…" if len(card.desc) > 600 else ""))
                             else:
-                                st.success("✅ Requirements & AC look complete — ready to generate test cases")
-                        else:
-                            st.caption("_(Validation not run yet)_")
+                                st.caption("_(No description on this card)_")
+
+                            # ── STEP 1b: AI Suggest User Story + AC ───────────
+                            _step_header("1b", "AI Suggested User Story & AC")
+                            ac_suggest_key = f"ac_suggestion_{card.id}"
+                            ac_saved_key   = f"ac_saved_{card.id}"
+                            ac_suggestion  = st.session_state.get(ac_suggest_key)
+                            ac_saved       = st.session_state.get(ac_saved_key, False)
+
+                            if ac_saved:
+                                st.success("✅ AI-generated AC saved to Trello description")
+                            elif ac_suggestion:
+                                st.markdown(ac_suggestion)
+                                col_save_ac, col_comment_ac, col_skip_ac, col_dm_ac, col_ch_ac = st.columns(5)
+                                with col_save_ac:
+                                    if st.button("✅ Save to Trello Description", key=f"save_ac_{card.id}",
+                                                 use_container_width=True, type="primary"):
+                                        with st.spinner("Updating Trello description…"):
+                                            TrelloClient(board_id=st.session_state.get("selected_board_id") or None).update_card_description(card.id, ac_suggestion)
+                                            card.desc = ac_suggestion
+                                        st.session_state[ac_saved_key] = True
+                                        st.rerun()
+                                with col_comment_ac:
+                                    if st.button("💬 Add to Trello Comment", key=f"comment_ac_{card.id}",
+                                                 use_container_width=True):
+                                        with st.spinner("Adding comment to Trello card…"):
+                                            TrelloClient(board_id=st.session_state.get("selected_board_id") or None).add_comment(card.id, ac_suggestion)
+                                        st.success("✅ AC added as Trello comment")
+                                with col_skip_ac:
+                                    if st.button("⏭️ Skip — Keep Existing", key=f"skip_ac_{card.id}",
+                                                 use_container_width=True):
+                                        st.session_state[ac_saved_key] = True  # mark done so it collapses
+                                        st.rerun()
+                                with col_dm_ac:
+                                    if st.button("📨 Send via Slack DM", key=f"open_dm_ac_{card.id}",
+                                                 use_container_width=True):
+                                        st.session_state[f"show_dm_ac_{card.id}"] = True
+                                        st.session_state[f"show_ch_ac_{card.id}"] = False
+                                with col_ch_ac:
+                                    if st.button("📢 Send to Channel", key=f"open_ch_ac_{card.id}",
+                                                 use_container_width=True):
+                                        st.session_state[f"show_ch_ac_{card.id}"] = True
+                                        st.session_state[f"show_dm_ac_{card.id}"] = False
+
+                                # ── Slack Channel panel (AC) ────────────────────
+                                if st.session_state.get(f"show_ch_ac_{card.id}"):
+                                    from pipeline.slack_client import (
+                                        dm_token_configured, list_slack_channels,
+                                        post_content_to_slack_channel,
+                                    )
+                                    if not dm_token_configured():
+                                        st.warning(
+                                            "⚠️ SLACK_BOT_TOKEN is not set — channel posting requires a bot token.\n\n"
+                                            "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                                        )
+                                    else:
+                                        st.markdown("##### 📢 Post AC to Slack Channel")
+                                        _ch_cache_key = "slack_channels_cache"
+                                        if _ch_cache_key not in st.session_state:
+                                            with st.spinner("Loading channels…"):
+                                                _chs, _ch_err, _ch_note = list_slack_channels()
+                                            if _ch_err:
+                                                st.error(f"❌ {_ch_err}")
+                                                _chs = []
+                                            st.session_state[_ch_cache_key] = (_chs, _ch_note)
+                                        else:
+                                            _chs, _ch_note = st.session_state[_ch_cache_key]
+
+                                        if _ch_note:
+                                            st.caption(f"ℹ️ {_ch_note}")
+
+                                        if _chs:
+                                            _ch_options = {
+                                                f"{'🔒' if c['is_private'] else '#'} {c['name']}": c["id"]
+                                                for c in _chs
+                                            }
+                                            _ac_ch_sel_col, _ac_ch_ref_col = st.columns([3, 1])
+                                            with _ac_ch_sel_col:
+                                                _ac_ch_sel = st.selectbox(
+                                                    "Select channel",
+                                                    options=list(_ch_options.keys()),
+                                                    key=f"ac_ch_select_{card.id}",
+                                                )
+                                            with _ac_ch_ref_col:
+                                                st.markdown("<br>", unsafe_allow_html=True)
+                                                if st.button("🔄 Refresh", key=f"ac_ch_refresh_{card.id}",
+                                                             use_container_width=True):
+                                                    del st.session_state[_ch_cache_key]
+                                                    st.rerun()
+
+                                            _ac_ch_sent_key = f"ac_ch_sent_{card.id}"
+                                            if st.session_state.get(_ac_ch_sent_key):
+                                                st.success("✅ AC posted to channel!")
+                                                if st.button("📢 Post again", key=f"ac_ch_resend_{card.id}"):
+                                                    st.session_state[_ac_ch_sent_key] = False
+                                                    st.rerun()
+                                            else:
+                                                if st.button(
+                                                    f"📢 Post to {_ac_ch_sel}",
+                                                    key=f"ac_ch_send_btn_{card.id}",
+                                                    type="primary",
+                                                    use_container_width=True,
+                                                ):
+                                                    _sel_ch_id = _ch_options[_ac_ch_sel]
+                                                    with st.spinner("Posting to channel…"):
+                                                        _ch_result = post_content_to_slack_channel(
+                                                            channel_id=_sel_ch_id,
+                                                            card_name=card.name,
+                                                            content_text=ac_suggestion,
+                                                            content_label="Acceptance Criteria",
+                                                            card_url=getattr(card, "url", ""),
+                                                        )
+                                                    if _ch_result["ok"]:
+                                                        st.session_state[_ac_ch_sent_key] = True
+                                                        st.rerun()
+                                                    else:
+                                                        st.error(f"❌ {_ch_result['error']}")
+
+                                # ── Slack DM panel (AC) ─────────────────────────
+                                if st.session_state.get(f"show_dm_ac_{card.id}"):
+                                    from pipeline.slack_client import (
+                                        dm_token_configured, search_slack_users, send_ac_dm,
+                                    )
+                                    if not dm_token_configured():
+                                        st.warning(
+                                            "⚠️ SLACK_BOT_TOKEN is not set — DMs require a bot token.\n\n"
+                                            "Add `SLACK_BOT_TOKEN=xoxb-...` to your `.env` file."
+                                        )
+                                    else:
+                                        st.markdown("##### 📨 Send AC via Slack DM")
+                                        # ── Search row ───────────────────────────
+                                        _dm_col1, _dm_col2 = st.columns([3, 1])
+                                        with _dm_col1:
+                                            _dm_query = st.text_input(
+                                                "Search member",
+                                                placeholder="Search by name — add multiple one by one",
+                                                key=f"dm_search_query_{card.id}",
+                                            )
+                                        with _dm_col2:
+                                            st.markdown("<br>", unsafe_allow_html=True)
+                                            _do_search = st.button(
+                                                "🔍 Search",
+                                                key=f"dm_search_btn_{card.id}",
+                                                use_container_width=True,
+                                            )
+
+                                        # Accumulated user pool (across multiple searches)
+                                        _pool_key = f"dm_user_pool_{card.id}"
+                                        if _pool_key not in st.session_state:
+                                            st.session_state[_pool_key] = {}  # {label: id}
+
+                                        if _do_search and _dm_query.strip():
+                                            with st.spinner("Searching…"):
+                                                _raw = search_slack_users(_dm_query.strip())
+                                            _found, _search_err = (_raw if isinstance(_raw, tuple)
+                                                                   else (_raw or [], ""))
+                                            if _search_err:
+                                                st.error(f"❌ {_search_err}")
+                                            elif not _found:
+                                                st.info("No users found — try a different name.")
+                                            else:
+                                                # Merge into pool
+                                                for u in _found:
+                                                    _lbl = f"{u['name']} (@{u['display_name']})"
+                                                    st.session_state[_pool_key][_lbl] = u["id"]
+                                                st.success(f"Found {len(_found)} user(s) — select below.")
+
+                                        _pool = st.session_state[_pool_key]
+                                        if _pool:
+                                            _selected_labels = st.multiselect(
+                                                "Select recipients (pick multiple)",
+                                                options=list(_pool.keys()),
+                                                key=f"dm_user_multi_{card.id}",
+                                            )
+                                            # Clear pool button
+                                            if st.button("✖ Clear search results",
+                                                         key=f"dm_clear_{card.id}"):
+                                                st.session_state[_pool_key] = {}
+                                                st.rerun()
+
+                                            _dm_sent_key = f"ac_dm_sent_{card.id}"
+                                            if st.session_state.get(_dm_sent_key):
+                                                st.success("✅ AC sent via Slack DM!")
+                                                if st.button("📨 Send again",
+                                                             key=f"dm_resend_{card.id}"):
+                                                    st.session_state[_dm_sent_key] = False
+                                                    st.rerun()
+                                            elif _selected_labels:
+                                                _selected_uids = [_pool[l] for l in _selected_labels]
+                                                _n = len(_selected_uids)
+                                                if st.button(
+                                                    f"📨 Send to {_n} person{'s' if _n > 1 else ''}",
+                                                    key=f"dm_send_btn_{card.id}",
+                                                    type="primary",
+                                                    use_container_width=True,
+                                                ):
+                                                    with st.spinner(f"Sending DM to {_n} recipient(s)…"):
+                                                        _dm_result = send_ac_dm(
+                                                            user_ids=_selected_uids,
+                                                            card_name=card.name,
+                                                            ac_text=ac_suggestion,
+                                                            content_label="Acceptance Criteria",
+                                                        )
+                                                    if _dm_result["ok"]:
+                                                        st.session_state[_dm_sent_key] = True
+                                                        st.rerun()
+                                                    else:
+                                                        _s, _f = _dm_result.get("sent",0), _dm_result.get("failed",0)
+                                                        if _s:
+                                                            st.warning(f"⚠️ Sent to {_s}, failed for {_f}: {_dm_result['error']}")
+                                                        else:
+                                                            st.error(f"❌ DM failed: {_dm_result['error']}")
+                                            else:
+                                                st.caption("Select at least one recipient above.")
+                            else:
+                                if st.button("🤖 Generate User Story & AC", key=f"gen_ac_{card.id}"):
+                                    from pipeline.card_processor import generate_acceptance_criteria
+                                    raw = f"{card.name}\n\n{card.desc or ''}".strip()
+                                    with st.spinner("Claude is generating User Story & AC…"):
+                                        st.session_state[ac_suggest_key] = generate_acceptance_criteria(
+                                            raw,
+                                            attachments=card.attachments,
+                                            checklists=card.checklists,
+                                        )
+                                    st.rerun()
+
+                            # ── STEP 2: Domain Expert Validation ──────────────
+                            _step_header("2", "Domain Expert Validation")
+                            val_key = f"validation_{card.id}"
+
+                            if vr:
+                                status_color = {"PASS": "🟢", "NEEDS_REVIEW": "🟡", "FAIL": "🔴"}.get(
+                                    vr.overall_status, "⚪"
+                                )
+                                st.markdown(f"{status_color} **{vr.overall_status}** — {vr.summary}")
+
+                                # KB insights
+                                if vr.kb_insights:
+                                    with st.expander("📚 Knowledge Base context", expanded=False):
+                                        st.markdown(vr.kb_insights)
+                                        if vr.sources:
+                                            st.caption("Sources: " + " · ".join(
+                                                f"[link]({s})" if s.startswith("http") else s
+                                                for s in vr.sources[:4]
+                                            ))
+
+                                # Issues grid
+                                has_issues = any([vr.requirement_gaps, vr.ac_gaps,
+                                                  vr.accuracy_issues, vr.suggestions])
+                                if has_issues:
+                                    c1, c2 = st.columns(2)
+                                    with c1:
+                                        if vr.accuracy_issues:
+                                            st.error("**❌ Accuracy Issues**")
+                                            for issue in vr.accuracy_issues:
+                                                st.markdown(f"- {issue}")
+                                        if vr.requirement_gaps:
+                                            st.warning("**⚠️ Requirement Gaps**")
+                                            for gap in vr.requirement_gaps:
+                                                st.markdown(f"- {gap}")
+                                    with c2:
+                                        if vr.ac_gaps:
+                                            st.warning("**📋 Missing AC Scenarios**")
+                                            for gap in vr.ac_gaps:
+                                                st.markdown(f"- {gap}")
+                                        if vr.suggestions:
+                                            st.info("**💡 Suggestions**")
+                                            for s in vr.suggestions:
+                                                st.markdown(f"- {s}")
+
+                                    # Fix + Re-validate
+                                    st.caption("👆 Fix the card on Trello, then re-validate below")
+                                    if st.button("🔄 Re-validate after fix", key=f"reval_{card.id}"):
+                                        # Refresh card from Trello + re-run validation
+                                        with st.spinner("Fetching updated card from Trello…"):
+                                            fresh = TrelloClient(board_id=st.session_state.get("selected_board_id") or None).get_card(card.id)
+                                        with st.spinner("Re-validating…"):
+                                            st.session_state[val_key] = validate_card(
+                                                card_name=fresh.name,
+                                                card_desc=fresh.desc or "",
+                                                acceptance_criteria=fresh.desc or "",
+                                            )
+                                            # Update stored card desc too
+                                            card.desc = fresh.desc
+                                        st.rerun()
+                                else:
+                                    st.success("✅ Requirements & AC look complete — ready to generate test cases")
+                            else:
+                                st.caption("_(Validation not run yet)_")
 
                         st.divider()
 
@@ -2111,6 +2111,9 @@ def main():
                             st.rerun()
 
                         st.divider()
+
+                        if _processed_only:
+                            continue  # skip Steps 3-5 for already-processed cards
 
                         # ── STEP 3: Generate Test Cases ───────────────────
                         _step_header("3", "Generate Test Cases")
