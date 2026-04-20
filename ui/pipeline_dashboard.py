@@ -1185,8 +1185,10 @@ def main():
                                 _chs, _ch_err, _ch_note = list_slack_channels()
                             if _ch_err:
                                 st.error(f"❌ {_ch_err}")
+                                st.caption("Click 🔄 Retry above to try again.")
                                 _chs = []
-                            st.session_state[_ch_cache_key] = (_chs, _ch_note or "")
+                            else:
+                                st.session_state[_ch_cache_key] = (_chs, _ch_note or "")
                         else:
                             _chs, _ch_note = st.session_state[_ch_cache_key]
                         if _ch_note:
@@ -1242,7 +1244,10 @@ def main():
                                     else:
                                         st.error(f"❌ {_res['error']}")
                         else:
-                            st.info("No channels found — check SLACK_BOT_TOKEN in .env")
+                            st.warning("⚠️ No channels returned. Retry below or check SLACK_BOT_TOKEN in .env.")
+                            if st.button("🔄 Retry", key=f"slack_retry_{card.id}_{id(card)}"):
+                                st.session_state.pop("slack_channels_cache", None)
+                                st.rerun()
 
                     # ── Re-validate link ───────────────────────────────────
                     if st.button(
@@ -1360,8 +1365,10 @@ def main():
                                 _chs, _ch_err, _ch_note = list_slack_channels()
                             if _ch_err:
                                 st.error(f"❌ {_ch_err}")
+                                st.caption("Click 🔄 Retry above to try again.")
                                 _chs = []
-                            st.session_state[_ch_cache_key] = (_chs, _ch_note or "")
+                            else:
+                                st.session_state[_ch_cache_key] = (_chs, _ch_note or "")
                         else:
                             _chs, _ch_note = st.session_state[_ch_cache_key]
                         if _ch_note:
@@ -1411,7 +1418,10 @@ def main():
                                     else:
                                         st.error(f"❌ {_res['error']}")
                         else:
-                            st.info("No channels found — check SLACK_BOT_TOKEN in .env")
+                            st.warning("⚠️ No channels returned. Retry below or check SLACK_BOT_TOKEN in .env.")
+                            if st.button("🔄 Retry", key=f"slack_retry_{card.id}_{id(card)}"):
+                                st.session_state.pop("slack_channels_cache", None)
+                                st.rerun()
 
                     # ── Regenerate link ────────────────────────────────────
                     if st.button("🔄 Regenerate Scenarios", key=f"gs_regen_{card.id}"):

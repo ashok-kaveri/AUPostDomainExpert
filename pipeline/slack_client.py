@@ -635,9 +635,16 @@ def list_slack_channels() -> tuple[list[dict], str, str]:
         )
         logger.info("Fetched %d Slack channels (%d private)", len(channels), private_count)
         return channels, "", note
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "?"
+        logger.debug("Slack channel list HTTP error %s: %s", status, exc)
+        return [], (
+            f"Slack API returned HTTP {status}. "
+            "This is usually a temporary Slack outage — wait a moment and retry."
+        ), ""
     except Exception as exc:
         logger.debug("Slack channel list failed: %s", exc)
-        return [], str(exc), ""
+        return [], f"Could not reach Slack: {exc}", ""
 
 
 def post_content_to_slack_channel(
