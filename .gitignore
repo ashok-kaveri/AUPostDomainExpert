@@ -7,9 +7,22 @@ venv/
 dist/
 build/
 
-# Data (vector store — large, rebuild with run_ingest.py)
+# Data — vector store (large, rebuild with run_ingest.py)
 data/chroma_db/*
 !data/chroma_db/.gitkeep
+
+# Data — runtime generated (not useful in git)
+data/dex_history/
+data/pipeline_history.json
+data/ac_drafts.json
+data/code_sync_state.json
+
+# Data — generated PDFs in handoff_docs (track .md files, not PDFs)
+data/handoff_docs/*.pdf
+
+# Data — keep directories tracked via .gitkeep
+!data/ai_qa_locator_traces/.gitkeep
+!data/handoff_docs/.gitkeep
 
 # Secrets
 .env
@@ -17,6 +30,10 @@ credentials.json
 
 # Streamlit
 .streamlit/
+
+# IDE
+.idea/
+.vscode/
 
 # OS
 .DS_Store
