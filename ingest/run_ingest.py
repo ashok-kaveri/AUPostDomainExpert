@@ -14,11 +14,13 @@ import logging
 import sys
 import time
 
+import config
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SOURCES = ["pluginhive_docs", "pluginhive_seeds", "sheets", "codebase", "wiki", "app", "aupost_api"]
+_DEFAULT_SOURCES = ["pluginhive_docs", "pluginhive_seeds", "sheets", "codebase", "wiki", "app", "aupost_api", "shopify_actions"]
 # pluginhive_docs  — Official PluginHive AU Post app setup guide (product docs, UX flows, FAQ)
 # pluginhive_seeds — Seed URL scrape of AU Post knowledge base and guide pages
 # sheets           — eParcel + MyPost Business test cases (Google Sheets)
@@ -26,6 +28,7 @@ _DEFAULT_SOURCES = ["pluginhive_docs", "pluginhive_seeds", "sheets", "codebase",
 # wiki             — Internal AU Post wiki markdown knowledge base
 # app              — Live AU Post app UI knowledge (inline + manual + browser capture)
 # aupost_api       — Australia Post REST API knowledge (service codes, request/response fields)
+# shopify_actions  — Shopify Admin API bulk order/product creation tool (JS src + config patterns)
 # pluginhive       — Full PluginHive web scrape (excluded by default — large)
 # shopify          — Shopify App Store listing
 
@@ -98,6 +101,18 @@ def run_ingest(sources: list[str] | None = None, clear: bool | None = None) -> N
         logger.info("Loading Australia Post REST API knowledge…")
         all_documents.extend(load_aupost_api_docs())
 
+    if "shopify_actions" in active_sources:
+        logger.info("Loading Shopify Actions codebase (bulk order/product creation)…")
+        from ingest.codebase_loader import load_codebase
+        sa_docs = load_codebase(
+            path=config.SHOPIFY_ACTIONS_PATH,
+            source_type="shopify_actions",
+            extensions=[".js", ".json"],
+            exclude_dirs=[".playground"],
+        )
+        all_documents.extend(sa_docs)
+        logger.info("Shopify Actions: %d chunks loaded", len(sa_docs))
+
     if not all_documents:
         logger.error("No documents loaded. Check your sources and try again.")
         sys.exit(1)
@@ -115,7 +130,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sources",
         nargs="*",
-        choices=["pluginhive", "pluginhive_seeds", "shopify", "pluginhive_docs", "codebase", "sheets", "pdf", "wiki", "app", "aupost_api"],
+        choices=["pluginhive", "pluginhive_seeds", "shopify", "pluginhive_docs", "codebase", "sheets", "pdf", "wiki", "app", "aupost_api", "shopify_actions"],
         help="Which sources to ingest (default: all)",
     )
     parser.add_argument(

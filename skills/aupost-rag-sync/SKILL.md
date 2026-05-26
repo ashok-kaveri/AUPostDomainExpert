@@ -16,7 +16,7 @@ Use this skill to keep the ChromaDB knowledge collections up to date with the la
 
 | Collection | Content | Ingest Source Key |
 |---|---|---|
-| `aupost_knowledge` | Domain docs, PluginHive docs, test cases, wiki, app, AU Post API | `pluginhive_docs`, `pluginhive_seeds`, `sheets`, `wiki`, `app`, `aupost_api` |
+| `aupost_knowledge` | Domain docs, PluginHive docs, test cases, wiki, app, AU Post API, Shopify Actions | `pluginhive_docs`, `pluginhive_seeds`, `sheets`, `wiki`, `app`, `aupost_api`, `shopify_actions` |
 | `aupost_code_knowledge` | Automation POM + specs, backend code, frontend code | `codebase` (automation), `codebase` (backend/frontend) |
 
 ## Ingest Commands
@@ -39,6 +39,9 @@ python -m ingest.run_ingest --sources aupost_api
 
 # Live app UI knowledge (scraped from app pages)
 python -m ingest.run_ingest --sources app
+
+# Shopify Actions bulk order/product creation tool (JS src)
+python -m ingest.run_ingest --sources shopify_actions
 
 # Automation codebase (POM + specs)
 python -m ingest.run_ingest --sources codebase

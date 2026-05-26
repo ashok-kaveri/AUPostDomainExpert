@@ -382,3 +382,4 @@ These project-local skills are auto-discovered by Claude Code. Invoke with the `
 | `aupost-rag-sync` | Re-ingest RAG sources — partial or full rebuild |
 | `aupost-signoff-message` | Compose and send sign-off messages after QA completes |
 | `aupost-slack-operator` | Send Slack messages, post reports, DM teammates |
+| `aupost-shopify-store-actions` | Create/update/delete Shopify products and orders via Admin API — natural language Shopify store management |
