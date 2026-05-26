@@ -80,9 +80,9 @@ TAB_KEYWORDS: dict[str, list[str]] = {
     "Single Label Generation [manual]":     ["single label", "manual label", "generate label", "label generation"],
     "Return Setting & Return Label":        ["return", "return label", "return setting"],
     "Pickup Settings":                      ["pickup", "pick up", "schedule pickup"],
-    "Additional Services":                  ["dry ice", "dangerous goods", "alcohol", "signature", "one rate",
-                                             "hold at location", "duties", "tax", "saturday delivery",
-                                             "pass signature", "priority signature"],
+    "Additional Services":                  ["dangerous goods", "signature on delivery", "authority to leave",
+                                             "atl", "extra cover", "safe drop", "declared value",
+                                             "additional service"],
     "Documents/Labels Settings1":           ["document", "commercial invoice", "customs", "ci ", "etd",
                                              "label size", "label format", "label setting"],
     "Printing & Downloading":               ["print", "download", "printing", "downloading", "bulk print"],
@@ -571,7 +571,7 @@ RELEASE_SHEET_HEADERS = [
 _JIRA_RE    = re.compile(r"\b([A-Z]{2,10}-\d+)\b")
 _TOGGLE_RE  = re.compile(r"toggle", re.IGNORECASE)
 # Use "REST API" / "RESTful" / "AUPOST_REST" to avoid matching plain English "rest"
-_REST_RE    = re.compile(r"\b(REST\s*API|RESTful|FEDEX[_-]REST|fedex[_-]rest)\b", re.IGNORECASE)
+_REST_RE    = re.compile(r"\b(REST\s*API|RESTful|AUPOST[_-]REST|aupost[_-]rest)\b", re.IGNORECASE)
 _SOAP_RE    = re.compile(r"\bsoap\b",  re.IGNORECASE)
 
 

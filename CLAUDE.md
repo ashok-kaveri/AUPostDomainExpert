@@ -20,15 +20,19 @@ It has three main capabilities:
 
 | File | Purpose |
 |------|---------|
-| `pipeline/smart_ac_verifier.py` | Core agentic AC verifier (most worked-on file) |
-| `ui/pipeline_dashboard.py` | Streamlit dashboard — threading for non-blocking runs |
+| `pipeline/smart_ac_verifier.py` | Core agentic AC verifier — 3,289 lines, fully upgraded |
+| `pipeline/requirement_research.py` | Research helper for User Story / AC generation |
+| `pipeline/handoff_docs.py` | Support guide + business brief generator + PDF export |
+| `ui/pipeline_dashboard.py` | Streamlit dashboard — threading + fragment-based Stop button |
 | `pipeline/trello_client.py` | Trello REST API wrapper |
 | `rag/code_indexer.py` | Indexes automation POM + backend code into ChromaDB |
 | `rag/vectorstore.py` | PluginHive docs RAG search |
 | `config.py` | All env-driven config: models, paths, ChromaDB, seed URLs |
 | `ingest/web_scraper.py` | Web scraping for PluginHive AU Post docs |
-| `ingest/run_ingest.py` | Ingestion pipeline entry point |
+| `ingest/aupost_api.py` | AU Post REST API knowledge — service codes, JSON fields, errors |
+| `ingest/run_ingest.py` | Ingestion pipeline entry point (includes aupost_api source) |
 | `ingest/sheets_loader.py` | Loads eParcel + MyPost Business test cases from Google Sheets |
+| `credentials.json` | Google Sheets service account credentials |
 
 ---
 
@@ -101,16 +105,28 @@ Flow Claude should follow for field-level verification:
 ## AU Post App UI Architecture (Critical)
 
 ### Iframe Structure
-- The AU Post app is embedded inside Shopify admin as an iframe: `iframe[name="app-iframe"]`
+- The AU Post app is embedded inside Shopify admin as an iframe
+- **ACTUAL iframe selector**: `iframe[src*="qa-aupost.pluginhive.io"], iframe[src*="pluginhive.io"], iframe[src*="aupost"]`
+  (NOT `iframe[name="app-iframe"]` — that is FedEx's selector)
 - App sidebar items (Shipping, Settings, PickUp, Products, FAQ, Rates Log) are **INSIDE** the iframe
 - Shopify admin items (Orders, Products in admin sidebar) are **OUTSIDE** the iframe
 - Navigation strategy: app nav items → search iframe first; Shopify nav → search full page first
 
+### App Routes (EXACT paths)
+- Shipping → `/apps/aupost-qa/shopify`
+- Settings → `/apps/aupost-qa/setting`  ← SINGULAR "setting" not "settings"
+- Products → `/apps/aupost-qa/products`
+- Pickup   → `/apps/aupost-qa/pickup`
+- Rates Log → `/apps/aupost-qa/rateslog`
+- FAQ       → `/apps/aupost-qa/faq`
+- Manifest  → `/apps/aupost-qa/manifest`
+- App Guide → `/apps/aupost-qa/app-guide`
+
 ### App Sidebar Navigation (inside iframe)
-- **Shipping** → "All Orders" grid (All / Pending / Label Generated tabs)
+- **Shipping** → "All Orders" grid (All / Pending / Label Generated / Manifest Completed / Returns — 5 tabs)
 - **PickUp** → Schedule Australia Post pickup
-- **Products** → Map products to dimensions, signature, extra cover
-- **Settings** → AU Post account, services, packages, additional services
+- **Products** → Map products to dimensions, signature, declared value
+- **Settings** → AU Post account, services, packages, additional settings (/setting route)
 - **FAQ** → Help articles
 - **Rates Log** → Historical rate request log
 
@@ -121,7 +137,7 @@ Flow Claude should follow for field-level verification:
 ### All Orders Grid (app Shipping page)
 Columns: Order#, Label created date, Customer, Label status, Shipping Service,
          Subtotal, Shipping Cost, Packages, Products, Weight, Messages
-Tab filters: All | Pending | Label Generated
+Tab filters: All | Pending | Label Generated | Manifest Completed | Returns  (5 tabs)
 Status values: "label generated" (green), "inprogress" (yellow), "failed" (red),
                "auto cancelled" (grey), "label cancelled"
 **Click an order ROW → opens Order Summary page for that order**
@@ -142,30 +158,35 @@ Buttons:
 ### Label Generation Flows
 
 **Manual Label** (user picks service):
-Shopify Orders → order row → More Actions → "Generate Label"
+Shopify Orders → click order → More Actions (role=button on page)
+→ **"AU Post Generate Label"** (role=link on page)  ← EXACT name
 → App opens (iframe) with TWO areas:
-  LEFT: a. "Generate Packages" → b. "Get Shipping Rates" → c. Select radio → d. "Generate Label"
+  LEFT: a. "Generate Packages" → b. "Get shipping rates" → c. Select radio → d. "Generate Label"
   RIGHT: **The SideDock** (ALWAYS VISIBLE — configure BEFORE generating label)
 → Redirects to Order Summary
 
 ### The SideDock — Always Visible Right Panel in Manual Label Page
-Contains (top to bottom):
-1. **Signature on Delivery**: checkbox — recipient must sign; cannot combine with ATL
-2. **Authority to Leave (ATL)**: checkbox — parcel left without signature; cannot combine with Signature
-3. **Extra Cover**: checkbox → input declared value AUD
+All elements are inside the iframe. EXACT locators:
+1. **Signature**: checkbox `"Request Signature?"` — cannot combine with ATL
+2. **Authority to Leave (ATL)**: checkbox `"Authority to Leave"` — cannot combine with Signature
+3. **Insurance / Extra Cover**: checkbox `"Insure package"` (or `"Insurance"`)
+   → "Insurance Details" dialog → spinbutton `"Declared Value"` (AUD)
    - Max: $5,000 AUD (eParcel) / $1,000 AUD (MyPost Business)
-4. **Safe Drop**: checkbox — leave in safe location
-5. **Dangerous Goods**: checkbox (eParcel domestic only)
+4. **Safe Drop**: look for safe drop related checkbox
+5. **Dangerous Goods**: look for dangerous goods related checkbox (eParcel domestic only)
 
 ### Return Label Flows (two entry points)
 **WAY A — From app Order Summary**:
-Order Summary → "Return packages" tab → "Return Packages" button
+Order Summary → "Return packages" tab (role=tab name="Return packages" in iframe)
+→ "Return Packages" button (role=button /Return Packages/i in iframe)
 → Enter return quantity → "Refresh Rates" → select service → "Generate Return Label"
 → Verify: "SUCCESS" badge + "Download Label" link visible
 
 **WAY B — From Shopify admin order page**:
-Shopify Orders → click order → More Actions → **"Generate Return Label"**
+Shopify Orders → click order → More Actions (role=button on page)
+→ **"Au Post Return Label"** (role=link on page)  ← EXACT name
 (NOT "Create return label" — that is a Shopify-native feature)
+(NOT "Generate Return Label")
 
 ### Rate Logs (ALL JSON — REST API only)
 **Rate log (in-page, during manual label)**:
@@ -267,19 +288,56 @@ UI stays responsive and the Stop button appears immediately.
 
 ## Environment Variables (.env)
 
+The `.env` file lives at the project root. All values are populated.
+
 ```
-ANTHROPIC_API_KEY=...
-TRELLO_API_KEY=...
-TRELLO_TOKEN=...
-TRELLO_BOARD_ID=...
-BACKEND_CODE_PATH=~/Documents/aupost-Backend-Code/shopifyaupostapp
-FRONTEND_CODE_PATH=~/Documents/aupost-Frontend-Code/shopify-aupost-web-client
-AUTOMATION_CODEBASE_PATH=../aupost-test-automation
+# Anthropic
+ANTHROPIC_API_KEY=<set>
 CLAUDE_SONNET_MODEL=claude-sonnet-4-6
 CLAUDE_HAIKU_MODEL=claude-haiku-4-5-20251001
+
+# Paths
+AUPOST_WIKI=/Users/madan/Documents/aupost-wiki
+AUTOMATION_CODEBASE_PATH=/Users/madan/Documents/AU_Post/aupost-test-automation
+BACKEND_CODE_PATH=/Users/madan/Documents/shopify-australia-post-app
+FRONTEND_CODE_PATH=/Users/madan/Documents/shopify-au-post-web-client
+
+# Google Sheets
 EPARCEL_SHEETS_ID=1Uf9NyCCwaKpHGlLVvI7S9xOVEGDekJNIHJFFlUsOcoA
 MYPOST_SHEETS_ID=1zLRpb2HSeb7XM4bJMb0ZCNWSDHr3zbFzN2meyhDnvEE
+GOOGLE_CREDENTIALS_PATH=./credentials.json
+
+# Trello (shared board with FedEx)
+TRELLO_API_KEY=<set>
+TRELLO_TOKEN=<set>
+TRELLO_BOARD_ID=PWKHwiCI
+
+# Slack
+SLACK_BOT_TOKEN=<set>
+SLACK_CHANNEL=C09F65XF4ER
+
+# Embeddings
+OLLAMA_BASE_URL=http://localhost:11434
+EMBEDDING_MODEL=nomic-embed-text
 ```
+
+### Google Sheets — Test Case Sources
+| Sheet | ID | URL |
+|-------|----|-----|
+| eParcel regression | `1Uf9NyCCwaKpHGlLVvI7S9xOVEGDekJNIHJFFlUsOcoA` | [Open](https://docs.google.com/spreadsheets/d/1Uf9NyCCwaKpHGlLVvI7S9xOVEGDekJNIHJFFlUsOcoA) |
+| MyPost Business regression | `1zLRpb2HSeb7XM4bJMb0ZCNWSDHr3zbFzN2meyhDnvEE` | [Open](https://docs.google.com/spreadsheets/d/1zLRpb2HSeb7XM4bJMb0ZCNWSDHr3zbFzN2meyhDnvEE) |
+
+### Documentation Seed URLs (all scraped into ChromaDB)
+- Product page: https://www.pluginhive.com/product/australia-post-shopify-shipping-app-rates-label-tracking/
+- Install guide: https://www.pluginhive.com/knowledge-base/install-and-activate-shopify-australia-post-app/
+- Setup guide: https://www.pluginhive.com/knowledge-base/shopify-australia-post-shipping-app-setup/
+- eParcel labels: https://www.pluginhive.com/knowledge-base/australia-post-eparcel-label-printing-in-shopify/
+- MyPost Business: https://www.pluginhive.com/knowledge-base/australia-post-mypost-business-shopify/
+- Rates: https://www.pluginhive.com/knowledge-base/australia-post-shipping-rates-in-shopify/
+- Tracking: https://www.pluginhive.com/knowledge-base/australia-post-tracking-shopify/
+- Returns: https://www.pluginhive.com/knowledge-base/australia-post-return-labels-shopify/
+- International: https://www.pluginhive.com/knowledge-base/australia-post-international-shipping-shopify/
+- Pickup: https://www.pluginhive.com/knowledge-base/australia-post-pickup-shopify/
 
 ---
 
@@ -302,3 +360,25 @@ python -m ingest.run_ingest --sources sheets
 # Full default pipeline
 python -m ingest.run_ingest
 ```
+
+---
+
+## Available Skills (skills/ directory)
+
+These project-local skills are auto-discovered by Claude Code. Invoke with the `Skill` tool:
+
+| Skill | When to Use |
+|-------|-------------|
+| `aupost-domain-core` | Any AU Post question — loads first for domain context, exact locators, app routes |
+| `aupost-ac-writer-reviewer` | Write or review Acceptance Criteria for a Trello card |
+| `aupost-trello-operator` | Read/update Trello cards, move cards between lists |
+| `aupost-ai-qa-browser` | Running or debugging AI QA browser verification sessions |
+| `aupost-ai-qa-testcase-prep` | Generate test cases (TC output format, evidence strategy mapping) |
+| `aupost-dashboard-tc-publisher` | Publish TCs to Trello comment or Google Sheets "Ai" tab |
+| `aupost-automation-writer` | Write Playwright TypeScript automation specs for AU Post / MyPost |
+| `aupost-bug` | Log a bug — severity guide, account type tagging, duplicate checks |
+| `aupost-handoff-docs` | Generate Support Guide or Business Brief for a feature |
+| `aupost-knowledge-maintainer` | Update ChromaDB knowledge when app behaviour changes |
+| `aupost-rag-sync` | Re-ingest RAG sources — partial or full rebuild |
+| `aupost-signoff-message` | Compose and send sign-off messages after QA completes |
+| `aupost-slack-operator` | Send Slack messages, post reports, DM teammates |

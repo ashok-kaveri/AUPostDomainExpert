@@ -2,9 +2,28 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
 
 BASE_DIR = Path(__file__).parent
+
+
+def _env_path(key: str, default: str = "") -> str:
+    """Return an env var, expanding ~ and resolving relative paths."""
+    raw = os.getenv(key, default)
+    if not raw:
+        return raw
+    p = Path(raw).expanduser()
+    return str(p)
+
+
+def require_env_path(key: str) -> Path:
+    val = _env_path(key)
+    if not val:
+        raise EnvironmentError(f"Required env var {key!r} is not set.")
+    p = Path(val)
+    if not p.exists():
+        raise FileNotFoundError(f"{key}={val!r} does not exist on disk.")
+    return p
 
 # Anthropic / Claude
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -31,6 +50,11 @@ BACKEND_CODE_PATH  = os.getenv("BACKEND_CODE_PATH", "")
 # Frontend: shopify-au-post-web-client  (React/TS frontend)
 FRONTEND_CODE_PATH = os.getenv("FRONTEND_CODE_PATH", "")
 
+# Shopify actions path (JSON file with UI interactions knowledge)
+SHOPIFY_ACTIONS_PATH = _env_path("SHOPIFY_ACTIONS_PATH", "")
+# PDF test cases path (additional test cases from PDF documents)
+PDF_TEST_CASES_PATH = _env_path("PDF_TEST_CASES_PATH", "")
+
 # File extensions to index from source code directories
 CODE_FILE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".php", ".java", ".py", ".go", ".rb", ".cs"]
 
@@ -42,21 +66,31 @@ PLUGINHIVE_BASE_URL = "https://www.pluginhive.com/product/australia-post-shopify
 PLUGINHIVE_SEED_URLS: list[str] = [
     # Product page
     "https://www.pluginhive.com/product/australia-post-shopify-shipping-app-rates-label-tracking/",
-    # Knowledge base articles
+    # Install & activate
     "https://www.pluginhive.com/knowledge-base/install-and-activate-shopify-australia-post-app/",
-    "https://www.pluginhive.com/knowledge-base/shopify-australia-post-shipping-app-setup/",
-    "https://www.pluginhive.com/knowledge-base/australia-post-eparcel-label-printing-in-shopify/",
-    "https://www.pluginhive.com/knowledge-base/australia-post-mypost-business-shopify/",
-    "https://www.pluginhive.com/knowledge-base/australia-post-shipping-rates-in-shopify/",
-    "https://www.pluginhive.com/knowledge-base/australia-post-tracking-shopify/",
-    "https://www.pluginhive.com/knowledge-base/australia-post-return-labels-shopify/",
-    "https://www.pluginhive.com/knowledge-base/australia-post-international-shipping-shopify/",
-    "https://www.pluginhive.com/knowledge-base/australia-post-pickup-shopify/",
+    # Full setup guide
+    "https://www.pluginhive.com/knowledge-base/set-up-shopify-australia-post-rates-labels-tracking-app/",
+    # Manual label generation
+    "https://www.pluginhive.com/knowledge-base/how-to-generate-shopify-shipping-labels-using-australia-post-rates-and-labels-app/",
+    # Auto label generation
+    "https://www.pluginhive.com/knowledge-base/automatic-shipping-label-generation-with-shopify-australia-post-app/",
+    # Real-time shipping rates
+    "https://www.pluginhive.com/knowledge-base/shopify-real-time-australia-post-shipping-rates/",
+    # Tracking & pickups
+    "https://www.pluginhive.com/knowledge-base/shopify-australia-post-shipment-tracking-and-scheduling-pickups/",
+    # International shipping
+    "https://www.pluginhive.com/knowledge-base/shopify-australia-post-international-shipping/",
+    # Packaging / box packing
+    "https://www.pluginhive.com/knowledge-base/pack-products-optimally-using-shopify-australia-post-rates-and-labels-app/",
+    # Label print preferences
+    "https://www.pluginhive.com/knowledge-base/shopify-australia-post-shipping-label-print-preferences/",
+    # Troubleshooting
+    "https://www.pluginhive.com/knowledge-base/troubleshoot-shopify-australia-post-app/",
 ]
 
 SHOPIFY_APP_STORE_URL = "https://apps.shopify.com/australia-post-rates-labels"
 
-AUTOMATION_CODEBASE_PATH = os.getenv(
+AUTOMATION_CODEBASE_PATH = _env_path(
     "AUTOMATION_CODEBASE_PATH",
     str(BASE_DIR.parent / "aupost-test-automation"),
 )

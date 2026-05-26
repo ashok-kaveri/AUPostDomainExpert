@@ -32,17 +32,21 @@ If Claude can't find a feature:
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
 import re
 import tempfile
+import time as _time
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from textwrap import dedent
 from typing import Callable
 
+import pdfplumber
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
@@ -50,10 +54,12 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_CODEBASE       = Path(config.AUTOMATION_CODEBASE_PATH)
-_AUTH_JSON      = _CODEBASE / "auth.json"
-_ENV_FILE       = _CODEBASE / ".env"
-MAX_STEPS       = 15
+_CODEBASE       = Path(config.AUTOMATION_CODEBASE_PATH) if config.AUTOMATION_CODEBASE_PATH else None
+_AUTH_JSON      = _CODEBASE / "auth.json" if _CODEBASE else None
+_ENV_FILE       = _CODEBASE / ".env" if _CODEBASE else None
+MAX_STEPS       = 24          # was 15
+MIN_QA_STEP     = 12          # earliest step Claude can issue qa_needed
+MAX_RECOVERIES  = 2           # max consecutive recovery attempts
 _ANTI_BOT_ARGS  = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
@@ -68,7 +74,119 @@ _CHALLENGE_PHRASES = [
 ]
 
 
+# ── PDF helpers ───────────────────────────────────────────────────────────────
+
+def _extract_pdf_text_from_bytes(pdf_bytes: bytes) -> str:
+    """Extract text from PDF bytes using pdfplumber."""
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            pages = []
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    pages.append(text)
+            return "\n\n".join(pages)
+    except Exception as exc:
+        return f"[PDF extraction failed: {exc}]"
+
+
+def _summarize_pdf_text(pdf_text: str) -> dict[str, object]:
+    """Return key fields parsed from AU Post label PDF text."""
+    result: dict[str, object] = {"raw_preview": pdf_text[:800]}
+    lines = pdf_text.splitlines()
+    for line in lines:
+        low = line.lower()
+        if "article id" in low or "tracking" in low:
+            result["tracking_info"] = line.strip()
+        if "from:" in low or "sender" in low:
+            result["sender"] = line.strip()
+        if "to:" in low or "recipient" in low:
+            result["recipient"] = line.strip()
+        if "weight" in low:
+            result["weight"] = line.strip()
+        if "service" in low:
+            result["service"] = line.strip()
+    return result
+
+
+def _summarize_document_bundle(bundle: dict[str, object]) -> dict[str, object]:
+    """Summarize a ZIP document bundle for context injection."""
+    summary: dict[str, object] = {}
+    for filename, content in bundle.items():
+        if isinstance(content, bytes) and filename.lower().endswith(".pdf"):
+            pdf_text = _extract_pdf_text_from_bytes(content)
+            summary[filename] = _summarize_pdf_text(pdf_text)
+        elif isinstance(content, str):
+            # JSON content - include as-is (already parsed)
+            summary[filename] = content[:3000] if len(content) > 3000 else content
+        else:
+            summary[filename] = str(content)[:1000]
+    return summary
+
+
 # ── Data models ───────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class PackagingRequirements:
+    """Package dimensions and weight for a test scenario (AU Post uses cm/kg)."""
+    length_cm: float = 10.0
+    width_cm: float = 10.0
+    height_cm: float = 10.0
+    weight_kg: float = 0.5
+    package_count: int = 1
+
+    def cubic_weight_kg(self) -> float:
+        return (self.length_cm * self.width_cm * self.height_cm) / 4000.0
+
+
+@dataclass(frozen=True)
+class OrderGridRequirements:
+    """Expectations when checking the Shipping → All Orders grid."""
+    expected_status: str = ""           # e.g. "label generated"
+    expected_service: str = ""          # e.g. "Parcel Post"
+    check_tracking_number: bool = False
+
+
+@dataclass(frozen=True)
+class ScenarioPrerequisitePlan:
+    """Structured plan for what needs to happen BEFORE the agentic loop."""
+    category: str                        # "label_generation" | "return_label" | "settings" | etc.
+    needs_new_order: bool = False
+    needs_product_config: bool = False
+    product_name: str = ""
+    packaging: PackagingRequirements = field(default_factory=PackagingRequirements)
+    special_services: list[str] = field(default_factory=list)  # ["signature", "extra_cover", "atl"]
+    extra_cover_amount: float = 0.0
+    account_type: str = "eparcel"        # "eparcel" | "mypost_business"
+    order_grid: OrderGridRequirements = field(default_factory=OrderGridRequirements)
+    execution_flow: str = ""             # free-text planning note
+    label_flow: str = "manual"           # "manual" | "auto"
+    order_action: str = "create_new"     # "create_new" | "existing_fulfilled" | "none"
+    setup_steps: tuple[str, ...] = field(default_factory=tuple)
+    verification_signals: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass
+class ParsedTestCase:
+    """A test case parsed from the test case sheet or markdown."""
+    title: str
+    description: str
+    ac_text: str
+    account_type: str = "eparcel"        # "eparcel" | "mypost_business"
+    priority: int = 5                    # 1-10, higher = run first
+    tags: list[str] = field(default_factory=list)
+    execution_flow: str = "manual"       # "manual" | "auto"
+    tc_type: str = "Positive"            # "Positive" | "Negative" | "Edge"
+    priority_rank: int = 5               # lower = higher priority
+    index: int = 0                       # original parse order
+
+    @property
+    def execution_text(self) -> str:
+        """Text used as the scenario string in the agentic loop."""
+        if self.description and self.description.strip():
+            return f"{self.title}: {self.description}"
+        return self.title
+
 
 @dataclass
 class VerificationStep:
@@ -147,21 +265,26 @@ _APP_WORKFLOW_GUIDE = dedent("""\
    PURPOSE: Edit AU Post-specific settings on an EXISTING product already in Shopify.
    HOW: Click a product row in the list → URL becomes <app_base>/products/<product_id>
 
-   EXACT FIELDS on the product edit page:
+   EXACT FIELDS on the product edit page (all in iframe):
    ┌─ Product Dimensions ────────────────────────────────────────────┐
-   │  Length [input]  cm   Width [input]  cm   Height [input]  cm    │
-   │  Weight [input]  kg                                             │
+   │  spinbutton "Length" + combobox "Length unit" (cm/in)           │
+   │  spinbutton "Width"  + combobox "Width unit"                    │
+   │  spinbutton "Height" + combobox "Height unit"                   │
+   │  spinbutton "Weight" + combobox "Weight unit" (kg/g/lb/oz)      │
    └─────────────────────────────────────────────────────────────────┘
-   ┌─ Special Services ──────────────────────────────────────────────┐
-   │  ☐ Signature on Delivery                                        │
-   │  ☐ Authority to Leave (ATL)                                     │
-   │  ☐ Extra Cover + declared value (AUD)                           │
-   │  ☐ Safe Drop                                                    │
-   │  ☐ Dangerous Goods (eParcel domestic only)                      │
+   ┌─ Supplementary Details ─────────────────────────────────────────┐
+   │  checkbox "Is this a Pre-Packed product?"                        │
+   │  checkbox "Is Alcohol"                                           │
+   │  combobox "Is Signature Needed"  ← DROPDOWN not checkbox        │
+   │  spinbutton "Declared Value $"                                   │
+   └─────────────────────────────────────────────────────────────────┘
+   ┌─ Dangerous Goods ──────────────────────────────────────────────┐
+   │  checkbox "Is Dangerous Goods"  (eParcel domestic only)         │
    └─────────────────────────────────────────────────────────────────┘
    SAVE: "Save" button → success toast "Products Successfully Saved"
    ⚠️ There is NO "Add product" button here. You CANNOT create new products here.
    ⚠️ Use "Test Product A" or "Test Product B" as default test products.
+   ⚠️ Signature on product is a DROPDOWN "Is Signature Needed" — NOT a checkbox.
 
 ❷  nav_clicks: "ShopifyProducts"  →  admin.shopify.com/store/<store>/products
    PURPOSE: Shopify's own product management — the ONLY place to ADD or create new products.
@@ -175,7 +298,7 @@ RULE: scenario about "add new product / create product / product with many varia
 ### All App Page URLs (direct navigation)
 - nav_clicks: "Shipping"    → <app_base>/shopify      — All Orders grid
 - nav_clicks: "PickUp"      → <app_base>/pickup       — Pickups list
-- nav_clicks: "Settings"    → <app_base>/settings     — App Settings
+- nav_clicks: "Settings"    → <app_base>/setting      — App Settings (route is /setting SINGULAR)
 - nav_clicks: "FAQ"         → <app_base>/faq
 - nav_clicks: "Rates Log"   → <app_base>/rateslog     — Rate request history
 - nav_clicks: "Orders"      → admin.shopify.com/store/<store>/orders
@@ -185,26 +308,28 @@ RULE: scenario about "add new product / create product / product with many varia
 Label generation happens through the Shopify admin Orders section:
 1. Click "Orders" in the Shopify LEFT sidebar (not the app sidebar)
 2. Click on an order ID to open the order detail page
-3. Click "More Actions" button (top-right dropdown on the order page)
-4. You will see label options:
-   - "Generate Label" → manual label generation (user picks service/package)
-   - "Auto-Generate Label" → automatically picks service and generates
+3. Click "More Actions" button (top-right dropdown on the order page) — role=button, on page NOT iframe
+4. You will see label options as LINKS (role=link, on page NOT iframe):
+   - "AU Post Generate Label" → manual label generation (user picks service/package)
+     ⚠️ EXACT link name: "AU Post Generate Label" (NOT "Generate Label")
+   - "Au Post Return Label" → return label flow
+     ⚠️ EXACT link name: "Au Post Return Label" (NOT "Generate Return Label")
 5. Click the desired option → the AU Post app opens inside Shopify for label creation
 6. Manual flow: Generate Packages → Get Shipping Rates → select service → Generate Label
 
 ### How to Cancel a Label
-1. Order Summary → click "More Actions" → click "Cancel Label"
+1. Order Summary → click "More Actions" (role=button in iframe) → click "Cancel Label"
 2. Confirm cancellation
 
 ### How to Regenerate a Label (after cancel)
 1. After cancelling → order status reverts to Pending
-2. Go to Shopify Orders → click the same order → More Actions → "Generate Label" again
+2. Go to Shopify Orders → click the same order → More Actions → "AU Post Generate Label" again
 
 ### App's Own Shipping / Orders Grid (inside the app iframe)
 - Click "Shipping" in the app sidebar → shows "All Orders" grid inside the iframe
 - Grid columns: Order#, Label created date, Customer, Label status, Shipping Service,
   Subtotal, Shipping Cost, Packages, Products, Weight, Messages
-- Tab filters: All | Pending | Label Generated
+- Tab filters: All | Pending | Label Generated | Manifest Completed | Returns  (5 tabs)
 - Label statuses: "label generated" (green), "inprogress" (yellow), "failed" (red),
   "auto cancelled" (grey), "label cancelled"
 - Top-right buttons: "Generate New Labels", "How to", "Help", "Generate Report"
@@ -212,8 +337,18 @@ Label generation happens through the Shopify admin Orders section:
 - Do NOT click "Generate New Labels" — that creates labels across multiple orders
 
 ### Settings Navigation
-- Click "Settings" in app sidebar → Settings page with multiple tabs/sections
-- Sections: Account, Packages, Additional Services, Rates, Print Settings, Notifications
+- Click "Settings" in app sidebar → navigates to /setting (SINGULAR) — Settings overview page
+- Sections (all on single scrollable page):
+  - Account Settings (h2) — "Edit" button opens account config
+  - Packaging (h2) — "Edit" button opens packaging config
+  - Product Settings (h4) — default weight/dimensions
+  - Rates Settings (h2) — Rate Cost dropdown, Enable Rates Log checkbox
+  - Documents/Labels Settings (h2) — image type, label layouts, branding options
+  - Packing Slip Settings (h4) — generate/print packing slips
+  - Additional Settings (h2) — delivery signature, insurance, product price
+  - International Shipping (h2) — classification type
+  - Pickup Settings (h2) — pickup start time, close time, pickup point
+  - Shop Contact Details (h2) — first name, last name, company
 
 ### Label Status Values (inside app's Shipping page)
 - Pending          → no label yet
@@ -232,18 +367,19 @@ nav_clicks: ["Orders"]  (start on Shopify Orders page)
 
 STEP 1 — Navigate to fresh order and start manual label:
   The fresh order just created is the MOST RECENT order at the top.
-  → Click on it → More Actions → "Generate Label" (use MANUAL label flow)
+  → Click on it → More Actions (role=button on page) → "AU Post Generate Label" (role=link on page)
   → Generate Packages → Get Shipping Rates (rates appear as radio buttons)
 
 STEP 2 — Configure SideDock BEFORE clicking Generate Label:
   The SideDock is on the RIGHT SIDE — ALWAYS VISIBLE during manual label generation.
-  SideDock options (configure ONLY what the scenario tests):
-    Signature on Delivery  → check checkbox (⚠️ cannot combine with ATL)
-    Authority to Leave     → check checkbox (⚠️ cannot combine with Signature)
-    Extra Cover            → check checkbox → fill declared value (AUD)
-                             Max: $5,000 (eParcel) / $1,000 (MyPost Business)
-    Safe Drop              → check checkbox
-    Dangerous Goods        → check checkbox (eParcel domestic only)
+  SideDock options (configure ONLY what the scenario tests — use EXACT checkbox names below):
+    Signature    → checkbox: "Request Signature?"      (⚠️ cannot combine with ATL)
+    ATL          → checkbox: "Authority to Leave"      (⚠️ cannot combine with Signature)
+    Insurance    → checkbox: "Insure package"          (label may also show as "Insurance")
+                   → "Insurance Details" dialog appears → fill spinbutton "Declared Value"
+                   Max: $5,000 AUD (eParcel) / $1,000 AUD (MyPost Business)
+    Safe Drop    → look for safe drop related checkbox
+    Dangerous Goods → look for dangerous goods related checkbox (eParcel domestic only)
 
 STEP 3 — Generate Label:
   → Select first radio button service
@@ -271,18 +407,20 @@ nav_clicks: ["AppProducts"]  (start on the AU Post app Products page)
 
 STEP 1 — Configure product in AU Post app:
   → Click "Products" in app sidebar → products list loads
-  → Click search icon → type "Test Product A" → press Enter → click product row
+  → Click "Search and filter results" button → type "Test Product A" → press Enter → click product row
   → Configure ONLY what the scenario tests:
-      Dimensions: fill Length, Width, Height (cm) + Weight (kg) → Save
-      Signature: check "Signature on Delivery" → Save
-      Extra Cover: check "Extra Cover" → fill declared value → Save
+      Dimensions: fill spinbutton "Length", "Width", "Height" + "Weight" → Save
+      Signature: select combobox "Is Signature Needed" → choose option → Save
+                 ⚠️ Signature is a DROPDOWN on product page, NOT a checkbox
+      Declared Value: fill spinbutton "Declared Value $" → Save
+      Dangerous Goods: check "Is Dangerous Goods" checkbox → Save
   → Click "Save" → toast "Products Successfully Saved"
 
 STEP 2 — Generate label on fresh order and verify JSON:
   action=navigate, path="orders"
   → The fresh order is the MOST RECENT order at the top
-  → Click it → More Actions → "Generate Label"
-  → Generate Packages → Get Rates → select service → Generate Label
+  → Click it → More Actions (role=button on page) → "AU Post Generate Label" (role=link on page)
+  → Generate Packages → Get Shipping Rates → select service → Generate Label
   → Verify via Download Documents ZIP (Strategy 2)
 
 ─────────────────────────────────────────────────────────
@@ -312,8 +450,9 @@ WAY A — From app Order Summary:
 8. Verify: "SUCCESS" badge + "Download Label" link visible
 
 WAY B — From Shopify admin:
-1. Shopify admin → Orders → click order → More Actions → "Generate Return Label"
-   ⚠️ NOT "Create return label" — that is a Shopify-native feature
+1. Shopify admin → Orders → click order → More Actions (role=button on page)
+   → "Au Post Return Label" (role=link on page)
+   ⚠️ EXACT link name: "Au Post Return Label" (NOT "Generate Return Label", NOT "Create return label")
 2. Same as Way A from step 4
 
 ─────────────────────────────────────────────────────────
@@ -393,63 +532,82 @@ WHICH STRATEGY TO USE:
 ⚠️ Print Documents is NOT a download — it opens a NEW TAB. Use switch_tab + screenshot + close_tab.
 
 ### ⚠️ Manual Label Generation — Full Flow
-1. Shopify Orders → click an order → More Actions → "Generate Label"
+1. Shopify Orders → click an order → More Actions (role=button on page)
+   → "AU Post Generate Label" (role=link on page) ⚠️ EXACT name, not just "Generate Label"
 2. Inside the app (iframe):
    LEFT SIDE:
-   a. Click "Generate Packages" button → packages auto-calculated
-   b. Click "Get shipping rates" button → AU Post rates load as radio buttons
+   a. Click "Generate Packages" button (role=button in iframe, matches /Generate Packages/i)
+   b. Click "Get shipping rates" button (role=button in iframe, matches /Get shipping rates|Fetch available shipping rates/i)
    c. Select a shipping service (click its radio button)
    RIGHT SIDE — The SideDock (ALWAYS VISIBLE — configure before generating label):
-   d. Configure SideDock options as needed (Signature, ATL, Extra Cover, Safe Drop, Dangerous Goods)
-   e. Click "Generate Label" button → label is created
+   d. Configure SideDock options using EXACT checkbox names (all in iframe):
+      - Signature:  checkbox "Request Signature?"
+      - ATL:        checkbox "Authority to Leave"
+      - Insurance:  checkbox "Insure package" → "Insurance Details" dialog → fill "Declared Value"
+   e. Click "Generate Label" button (role=button in iframe, matches /^Generate Label$/i)
 3. After generation the Order Summary page opens automatically
 
 ### ⚠️ The SideDock — Manual Label Options Panel (ALWAYS VISIBLE)
 The SideDock is a panel on the RIGHT SIDE of the Manual Label page.
 It is ALWAYS visible — no need to open or toggle it.
 Settings configured here OVERRIDE any product-level settings for this label.
+All SideDock elements are INSIDE the app iframe.
 
-SideDock contains (top to bottom):
+SideDock contains (top to bottom) — use EXACT names for click actions:
 1. SIGNATURE ON DELIVERY
-   - Checkbox: "Signature on Delivery"
+   - Checkbox EXACT name: "Request Signature?"
+     (role=checkbox, name="Request Signature?" in iframe)
    - ⚠️ Cannot combine with Authority to Leave
    - Verifiable in JSON: options.signature_on_delivery = true
 
 2. AUTHORITY TO LEAVE (ATL)
-   - Checkbox: "Authority to Leave"
+   - Checkbox EXACT name: "Authority to Leave"
+     (role=checkbox, name="Authority to Leave" in iframe)
    - ⚠️ Cannot combine with Signature on Delivery
    - Verifiable in JSON: options.authority_to_leave = true
 
-3. EXTRA COVER
-   - Checkbox: "Extra Cover"
-   - After checking → input field appears: declared value (AUD)
+3. INSURANCE / EXTRA COVER
+   - Checkbox EXACT name: "Insure package"  (may also appear as "Insurance")
+     (role=checkbox, name=/Insure package|Insurance/i in iframe)
+   - After checking → "Insurance Details" dialog appears
+   - In dialog: fill spinbutton "Declared Value" with AUD amount
    - Max: $5,000 AUD (eParcel) / $1,000 AUD (MyPost Business)
    - Verifiable in JSON: options.extra_cover.amount = <value>
 
 4. SAFE DROP
-   - Checkbox: "Safe Drop"
+   - Look for safe drop checkbox in iframe
    - Leave parcel in a safe location if no one home
 
 5. DANGEROUS GOODS
-   - Checkbox: "Dangerous Goods"
+   - Look for dangerous goods checkbox in iframe
    - eParcel domestic only — NOT available for MyPost Business
    - Verifiable in JSON: items[0].contains_dangerous_goods = true
 
 ### ⚠️ AU Post App — Product Config (AppProducts page)
 URL: <app_base>/products
-1. Click "Products" in app sidebar
-2. Search product: click search/filter button → type product name → press Enter
-3. Click product row → product detail page opens
-4. Configure ONLY what the scenario tests:
-   - Dimensions: Length (cm), Width (cm), Height (cm), Weight (kg)
-   - Signature on Delivery: checkbox
-   - Authority to Leave: checkbox
-   - Extra Cover: checkbox + declared value (AUD)
-   - Safe Drop: checkbox
-   - Dangerous Goods: checkbox (eParcel only)
+1. Click "Products" in app sidebar → products list with table (Product Name, Price, Weight, Length, Width, Height columns)
+2. Search product: click "Search and filter results" button → type product name → press Enter
+3. Click product row (button with product name) → product detail page opens
+4. Configure ONLY what the scenario tests (EXACT field names in iframe):
+   ┌─ Product Dimensions ───────────────────────────────────────────┐
+   │  spinbutton "Length"  + combobox "Length unit" (cm/in)         │
+   │  spinbutton "Width"   + combobox "Width unit"                  │
+   │  spinbutton "Height"  + combobox "Height unit"                 │
+   │  spinbutton "Weight"  + combobox "Weight unit" (kg/g/lb/oz)    │
+   └────────────────────────────────────────────────────────────────┘
+   ┌─ Supplementary Details ────────────────────────────────────────┐
+   │  checkbox "Is this a Pre-Packed product?"                       │
+   │  checkbox "Is Alcohol"                                          │
+   │  combobox "Is Signature Needed" (dropdown: REQUIRED/NOT REQUIRED/etc.)  │
+   │  spinbutton "Declared Value $"                                  │
+   └────────────────────────────────────────────────────────────────┘
+   ┌─ Dangerous Goods ──────────────────────────────────────────────┐
+   │  checkbox "Is Dangerous Goods"  (eParcel only)                  │
+   └────────────────────────────────────────────────────────────────┘
 5. Click "Save" → toast "Products Successfully Saved"
-6. Back button (aria-label="products") → back to product list
+6. Back button role=button name="products" → back to product list
 Use "Test Product A" or "Test Product B" as default test products.
+⚠️ Signature is a DROPDOWN ("Is Signature Needed"), NOT a checkbox here.
 
 ### ⚠️ How to Generate a Return Label
 WAY A — From Inside the App:
@@ -464,8 +622,9 @@ WAY A — From Inside the App:
 
 WAY B — From Shopify Admin:
 1. Shopify admin → Orders → click the order
-2. More Actions → "Generate Return Label"
-   ⚠️ NOT "Create return label" — that is a different Shopify feature
+2. More Actions (role=button on page) → "Au Post Return Label" (role=link on page)
+   ⚠️ EXACT link name: "Au Post Return Label"
+   ⚠️ NOT "Create return label" — that is a different Shopify-native feature
 3. Same steps as Way A from step 4
 
 ### ⚠️ How to View Rate Logs (Rates Log page)
@@ -474,9 +633,18 @@ WAY B — From Shopify Admin:
 - For JSON field verification on test orders → use Download Documents ZIP (Strategy 2).
 
 HOW TO USE Rates Log (only for storefront checkout rate scenarios):
-1. Click "Rates Log" in the app sidebar
-2. List of rate requests: each row has order ID, date, status
-3. Click a row → expands to show request/response JSON
+1. Click "Rates Log" in the app sidebar → navigates to /rateslog
+2. Page heading: "Rate Logs" — table with columns: Requested Date, Reference ID, Info
+3. Each row has a "View" button → click it → opens "Rates Log" dialog
+4. Dialog shows: Request (textarea on left) + Response (textarea on right)
+5. Read JSON from textareas to verify request/response fields
+6. Click "Close" button to dismiss dialog
+
+Additional buttons on Rates Log page:
+- "View Logs" button — view rate request logs
+- "Download Logs" button — download logs as file
+- "View Address Logs" button — view address validation logs
+- "Search and filter results" button → opens search input
 
 ### ⚠️ eParcel vs MyPost Business Account Types
 eParcel:
@@ -494,11 +662,21 @@ MyPost Business:
   - Services: Standard, Express
 
 ### ⚠️ Pickup Scheduling — Full Flow
-1. Navigate to "PickUp" in the app sidebar
-2. Click "Schedule Pickup" or equivalent button
-3. Fill pickup details: date, time, location, package count
-4. Submit → pickup confirmation number generated
-5. Verify: pickup appears in list with "SUCCESS" status
+1. Navigate to "PickUp" in the app sidebar → /pickup route
+2. Pickup page loads with heading "Pickup" (h1 in iframe)
+3. Page has table with columns: Orders, Pickup Status, Pickup Requested Date, Pickup Number
+4. Each row has two dropdowns (buttons): Orders dropdown + Pickup Status dropdown
+5. To schedule a pickup: open Orders dropdown for an order → select pickup action
+6. After scheduling → "Pickup requested." toast appears
+7. Verify: pickup row shows in table with status column updated
+
+Pickup page locators (all in iframe):
+- heading: "Pickup"
+- allTab: role=tab name="All"
+- table: role=table
+- "How to" button + "Help" button
+- "Previous"/"Next" pagination buttons
+- page info text: "Page X of Y"
 """)
 
 # ── Selective workflow guide trimmer ─────────────────────────────────────────
@@ -761,6 +939,126 @@ _SUMMARY_PROMPT = dedent("""\
 """)
 
 
+# ── Stop flag infrastructure ──────────────────────────────────────────────────
+
+def _is_stop_requested(stop_flag) -> bool:
+    """Return True if a stop has been requested via the stop_flag."""
+    if stop_flag is None:
+        return False
+    if callable(stop_flag):
+        return bool(stop_flag())
+    # threading.Event
+    if hasattr(stop_flag, "is_set"):
+        return stop_flag.is_set()
+    return bool(stop_flag)
+
+
+def _cooperative_wait(page, timeout_ms: int, stop_flag=None, chunk_ms: int = 250) -> None:
+    """Sleep for timeout_ms in small chunks, checking stop_flag each chunk."""
+    elapsed = 0
+    while elapsed < timeout_ms:
+        if _is_stop_requested(stop_flag):
+            return
+        wait = min(chunk_ms, timeout_ms - elapsed)
+        _time.sleep(wait / 1000.0)
+        elapsed += wait
+
+
+# ── Retry logic ───────────────────────────────────────────────────────────────
+
+def _is_retryable_claude_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in ("rate_limit", "overloaded", "529", "503", "timeout", "502"))
+
+
+def _claude_invoke_with_retry(claude, messages, *, purpose: str, max_attempts: int = 5):
+    """Invoke Claude with exponential backoff on transient errors."""
+    delay = 5.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return claude.invoke(messages)
+        except Exception as exc:
+            if attempt == max_attempts or not _is_retryable_claude_error(exc):
+                raise
+            print(f"[retry] {purpose}: attempt {attempt}/{max_attempts} failed ({exc}), retrying in {delay:.0f}s")
+            _time.sleep(delay)
+            delay = min(delay * 2, 60.0)
+    raise RuntimeError(f"_claude_invoke_with_retry exhausted for: {purpose}")
+
+
+# ── Utility helpers ───────────────────────────────────────────────────────────
+
+def _normalize_app_base(url: str) -> str:
+    """Strip query string and fragment, keep path up to the app route."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+
+
+def _close_browser_async(ctx, browser) -> None:
+    """Close browser context and browser in a background thread (non-blocking)."""
+    def _close():
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        try:
+            browser.close()
+        except Exception:
+            pass
+    threading.Thread(target=_close, daemon=True).start()
+
+
+def _click_any(page_or_frame, locators: list, timeout: int = 5000, wait_ms: int = 400) -> bool:
+    """Try clicking each locator in order; return True if one succeeded."""
+    for loc_str in locators:
+        try:
+            el = page_or_frame.locator(loc_str).first
+            el.wait_for(state="visible", timeout=timeout)
+            el.click()
+            _time.sleep(wait_ms / 1000.0)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _record_setup_step(result: dict, action: str, description: str, target: str = "", success: bool = True) -> None:
+    """Append a setup step record to result['setup_steps']."""
+    result.setdefault("setup_steps", []).append({
+        "action": action,
+        "description": description,
+        "target": target,
+        "success": success,
+    })
+
+
+def _append_evidence_note(result: dict, note: str) -> None:
+    """Append a note to result['evidence_notes']."""
+    result.setdefault("evidence_notes", []).append(note)
+
+
+def _summarise_report(report: dict) -> str:
+    """Return a one-line summary of a verification report."""
+    total = report.get("total", 0)
+    passed = report.get("passed", 0)
+    failed = report.get("failed", 0)
+    partial = report.get("partial", 0)
+    qa_needed = report.get("qa_needed", 0)
+    return f"{passed}/{total} passed, {failed} failed, {partial} partial, {qa_needed} qa_needed"
+
+
+def _finalize_scenario_evidence(result: dict, active_page, net_seen: list) -> None:
+    """Capture final page screenshot + URL into result evidence."""
+    try:
+        result["final_url"] = active_page.url
+        screenshot_bytes = active_page.screenshot(full_page=False)
+        result["final_screenshot_b64"] = base64.b64encode(screenshot_bytes).decode()
+    except Exception:
+        pass
+    result["network_calls_seen"] = net_seen[:50]  # cap
+
+
 # ── Browser helpers ───────────────────────────────────────────────────────────
 
 def get_auto_app_url() -> str:
@@ -907,7 +1205,12 @@ def _network(page, endpoints: list[str]) -> list[str]:
 
 
 def _app_frame(page):
-    return page.frame_locator('iframe[name="app-iframe"]')
+    # AU Post app iframe selector — matches qa-aupost.pluginhive.io or any pluginhive/aupost src
+    return page.frame_locator(
+        'iframe[src*="qa-aupost.pluginhive.io"], '
+        'iframe[src*="pluginhive.io"], '
+        'iframe[src*="aupost"]'
+    )
 
 
 def _do_action(page, action: dict, app_base: str) -> bool:
@@ -1632,8 +1935,10 @@ def _get_preconditions(scenario: str) -> str:
         return dedent("""\
             PRE-REQUIREMENTS (AU Post — Signature on Delivery):
             1. order_action: create_new  (fresh Shopify order)
-            FLOW during Manual Label:
-            - SideDock: check 'Signature on Delivery' checkbox
+            FLOW during Manual Label (after Generate Packages + Get Shipping Rates):
+            - In Shopify Orders: More Actions (role=button) → "AU Post Generate Label" (role=link)
+            - SideDock: click checkbox with EXACT name "Request Signature?"
+              (role=checkbox name="Request Signature?" in iframe)
               ⚠️ Cannot combine with Authority to Leave
             VERIFY via Download Documents ZIP (Strategy 2):
             - More Actions → Download Documents → ZIP extracted
@@ -1644,24 +1949,29 @@ def _get_preconditions(scenario: str) -> str:
         return dedent("""\
             PRE-REQUIREMENTS (AU Post — Authority to Leave / ATL):
             1. order_action: create_new  (fresh Shopify order)
-            FLOW during Manual Label:
-            - SideDock: check 'Authority to Leave' checkbox
-              ⚠️ Cannot combine with Signature on Delivery
+            FLOW during Manual Label (after Generate Packages + Get Shipping Rates):
+            - In Shopify Orders: More Actions (role=button) → "AU Post Generate Label" (role=link)
+            - SideDock: click checkbox with EXACT name "Authority to Leave"
+              (role=checkbox name="Authority to Leave" in iframe)
+              ⚠️ Cannot combine with Signature on Delivery (Request Signature? checkbox)
             VERIFY via Download Documents ZIP (Strategy 2):
             - More Actions → Download Documents → ZIP extracted
             - JSON must contain: options.authority_to_leave = true
             CLEANUP: Not required (SideDock settings apply per-label only)""")
 
-    if "extra cover" in s:
+    if "extra cover" in s or "insurance" in s or "insure" in s:
         # Try to extract declared value from scenario text
         import re as _re
         amount_match = _re.search(r"\$?\s*(\d+(?:\.\d+)?)", scenario)
         amount = amount_match.group(1) if amount_match else "500"
         return dedent(f"""\
-            PRE-REQUIREMENTS (AU Post — Extra Cover):
+            PRE-REQUIREMENTS (AU Post — Insurance / Extra Cover):
             1. order_action: create_new  (fresh Shopify order)
-            FLOW during Manual Label:
-            - SideDock: check 'Extra Cover' checkbox → fill declared value = '{amount}' (AUD)
+            FLOW during Manual Label (after Generate Packages + Get Shipping Rates):
+            - In Shopify Orders: More Actions (role=button) → "AU Post Generate Label" (role=link)
+            - SideDock: click checkbox with EXACT name "Insure package"
+              (role=checkbox name="Insure package" in iframe — may also appear as "Insurance")
+            - "Insurance Details" dialog appears → fill spinbutton "Declared Value" = {amount}
               Max: $5,000 AUD (eParcel) / $1,000 AUD (MyPost Business)
             VERIFY via Download Documents ZIP (Strategy 2):
             - More Actions → Download Documents → ZIP extracted
@@ -1672,8 +1982,9 @@ def _get_preconditions(scenario: str) -> str:
         return dedent("""\
             PRE-REQUIREMENTS (AU Post — Safe Drop):
             1. order_action: create_new  (fresh Shopify order)
-            FLOW during Manual Label:
-            - SideDock: check 'Safe Drop' checkbox
+            FLOW during Manual Label (after Generate Packages + Get Shipping Rates):
+            - In Shopify Orders: More Actions (role=button) → "AU Post Generate Label" (role=link)
+            - SideDock: look for "Safe Drop" checkbox in iframe and check it
             VERIFY via Download Documents ZIP (Strategy 2):
             - More Actions → Download Documents → ZIP extracted
             - JSON must contain: options.safe_drop = true (or similar field)
@@ -1684,8 +1995,10 @@ def _get_preconditions(scenario: str) -> str:
             PRE-REQUIREMENTS (AU Post — Dangerous Goods):
             ⚠️ Dangerous Goods is eParcel DOMESTIC ONLY — NOT available for MyPost Business.
             1. order_action: create_new  (fresh Shopify order with AU domestic address)
-            FLOW during Manual Label:
-            - SideDock: check 'Dangerous Goods' checkbox (only visible for eParcel domestic)
+            FLOW during Manual Label (after Generate Packages + Get Shipping Rates):
+            - In Shopify Orders: More Actions (role=button) → "AU Post Generate Label" (role=link)
+            - SideDock: look for "Dangerous Goods" or "Is Dangerous Goods" checkbox in iframe
+              (only visible for eParcel domestic orders)
             VERIFY via Download Documents ZIP (Strategy 2):
             - More Actions → Download Documents → ZIP extracted
             - JSON must contain: items[0].contains_dangerous_goods = true
@@ -1696,16 +2009,18 @@ def _get_preconditions(scenario: str) -> str:
             PRE-REQUIREMENTS (AU Post — Return Label):
             order_action: existing_fulfilled  (need an order that already has a label)
             FLOW (WAY A — from inside the app):
-            1. App sidebar → Shipping → Label Generated tab → click first order
-            2. Click 'Return packages' tab
-            3. Click 'Return Packages' button
+            1. App sidebar → Shipping → Label Generated tab → click first order row
+            2. On Order Summary: click 'Return packages' tab (role=tab name="Return packages" in iframe)
+            3. Click 'Return Packages' button (role=button name=/Return Packages/i in iframe)
             4. Enter return quantity (default 1)
-            5. Click 'Refresh Rates' → rates load
+            5. Click 'Refresh Rates' button → rates load
             6. Select service radio button
-            7. Click 'Generate Return Label'
+            7. Click 'Generate Return Label' button
             VERIFY: 'SUCCESS' badge + 'Download Label' link visible
             FLOW (WAY B — from Shopify admin):
-            1. Shopify Orders → click order → More Actions → 'Generate Return Label'
+            1. Shopify Orders → click order → More Actions (role=button on page)
+               → 'Au Post Return Label' (role=link on page)
+               ⚠️ EXACT link name: 'Au Post Return Label'
                ⚠️ NOT 'Create return label' — that is Shopify-native""")
 
     if "parcel post" in s or "t28" in s:
@@ -1713,9 +2028,11 @@ def _get_preconditions(scenario: str) -> str:
             PRE-REQUIREMENTS (AU Post — Parcel Post / T28):
             1. order_action: create_new  (fresh Shopify order)
             FLOW during Manual Label:
-            - Generate Packages → Get Shipping Rates
+            - Shopify Orders: More Actions (role=button) → "AU Post Generate Label" (role=link)
+            - Click "Generate Packages" button (role=button /Generate Packages/i in iframe)
+            - Click "Get shipping rates" button (role=button /Get shipping rates/i in iframe)
             - Select 'Parcel Post' service radio button
-            - Click 'Generate Label'
+            - Click "Generate Label" button (role=button /^Generate Label$/i in iframe)
             VERIFY via Download Documents ZIP (Strategy 2):
             - JSON must contain: items[0].product_id = 'T28'""")
 
@@ -1724,9 +2041,11 @@ def _get_preconditions(scenario: str) -> str:
             PRE-REQUIREMENTS (AU Post — Express Post / E86J):
             1. order_action: create_new  (fresh Shopify order)
             FLOW during Manual Label:
-            - Generate Packages → Get Shipping Rates
+            - Shopify Orders: More Actions (role=button) → "AU Post Generate Label" (role=link)
+            - Click "Generate Packages" button (role=button /Generate Packages/i in iframe)
+            - Click "Get shipping rates" button (role=button /Get shipping rates/i in iframe)
             - Select 'Express Post' service radio button
-            - Click 'Generate Label'
+            - Click "Generate Label" button (role=button /^Generate Label$/i in iframe)
             VERIFY via Download Documents ZIP (Strategy 2):
             - JSON must contain: items[0].product_id = 'E86J'""")
 
@@ -1861,7 +2180,8 @@ def _verify_scenario(
         "shipping":        f"{app_base}/shopify",
         "appproducts":     f"{app_base}/products",
         "products":        f"{app_base}/products",
-        "settings":        f"{app_base}/settings",
+        "settings":        f"{app_base}/setting",   # AU Post app route is /setting (singular)
+        "setting":         f"{app_base}/setting",
         "pickup":          f"{app_base}/pickup",
         "faq":             f"{app_base}/faq",
         "rates log":       f"{app_base}/rateslog",
@@ -2396,3 +2716,656 @@ def reverify_failed(
     report.summary = resp.content.strip()
 
     return report
+
+
+# ── Prerequisite planner ──────────────────────────────────────────────────────
+
+def _has_any(text: str, keywords: "tuple[str, ...] | list[str]") -> bool:
+    """Return True if any keyword appears in text."""
+    return any(kw in text for kw in keywords)
+
+
+def _build_prerequisite_plan(scenario: str, execution_flow_override: str = "") -> ScenarioPrerequisitePlan:
+    """
+    AU Post prerequisite planner.
+    Converts a scenario string into a concrete setup plan before the agentic loop.
+    """
+    s = f" {scenario.lower()} "
+
+    # Determine label flow
+    needs_manual_flow = _has_any(s, (
+        "manual label", "generate label", "label generation",
+        "signature", "authority to leave", " atl ", "extra cover",
+        "safe drop", "dangerous goods", "view logs", "rate log",
+        "rates log", "request log", "before generate",
+        "get shipping rates", "generate packages", "declared value",
+    ))
+    wants_auto_flow = _has_any(s, (
+        "auto-generate", "auto generate", "auto label", "automatically generate",
+    ))
+    needs_final_output = _has_any(s, (
+        "download documents", "print documents", "request/response",
+        "download label", "label generated", "order summary",
+        "download zip", "json file",
+    ))
+    label_flow = "manual" if needs_manual_flow else ("auto" if (wants_auto_flow or needs_final_output) else "manual")
+    if execution_flow_override in ("manual", "auto"):
+        label_flow = execution_flow_override
+
+    account_type = "mypost_business" if _has_any(s, ("mypost", "my post business", "mypost business")) else "eparcel"
+
+    # Settings / navigation only
+    if _has_any(s, (
+        "settings", "configuration", "configure", "save setting",
+        "rates log", "rate log", "order grid", "orders grid",
+        "filter", "pagination", "sidebar", "navigation",
+        "pickup", "schedule pickup", "faq",
+    )) and not _has_any(s, ("generate label", "create label", "label generation")):
+        return ScenarioPrerequisitePlan(
+            category="settings_or_grid",
+            order_action="none",
+            label_flow=label_flow,
+            account_type=account_type,
+            setup_steps=(
+                "Navigate directly to the target app page.",
+                "Verify the grid, navigation, settings save, or pickup UI.",
+            ),
+            verification_signals=(
+                "The target UI is reachable and interactive.",
+                "Saved values, filters, or navigation state persist as expected.",
+            ),
+        )
+
+    # Product config in AU Post app
+    if _has_any(s, (
+        "product dimensions", "product weight", "product configuration",
+        "app products", "products page",
+    )) and not _has_any(s, ("generate label", "label generation")):
+        return ScenarioPrerequisitePlan(
+            category="product_config",
+            order_action="none",
+            label_flow="manual",
+            account_type=account_type,
+            setup_steps=(
+                "Open AU Post App Products (app sidebar → Products).",
+                "Search for 'Test Product A' or the specified product.",
+                "Set dimensions, weight, or special services as required.",
+                "Save and verify the toast 'Products Successfully Saved'.",
+            ),
+            verification_signals=(
+                "Product settings are saved successfully.",
+                "The saved values are visible on the product page.",
+            ),
+        )
+
+    # Return label
+    if _has_any(s, ("return label", "generate return", "return packages", "return package", "return tab")):
+        return ScenarioPrerequisitePlan(
+            category="return_label",
+            order_action="existing_fulfilled",
+            label_flow="manual",
+            account_type=account_type,
+            setup_steps=(
+                "Use an order that already has a generated forward label.",
+                "Open Order Summary from the app Shipping grid.",
+                "Click 'Return packages' tab → 'Return Packages' button.",
+                "Enter return quantity → 'Refresh Rates' → select service → 'Generate Return Label'.",
+            ),
+            verification_signals=(
+                "Return label generated with 'SUCCESS' badge.",
+                "'Download Label' link is visible after return label generation.",
+            ),
+        )
+
+    # Download documents / verify JSON
+    if _has_any(s, (
+        "download documents", "download document", "request/response",
+        "json file", "createshipment", "article id", "tracking number in json",
+        "verify json", "verify request", "verify response",
+    )):
+        return ScenarioPrerequisitePlan(
+            category="existing_label_flow",
+            order_action="existing_fulfilled",
+            label_flow=label_flow,
+            account_type=account_type,
+            setup_steps=(
+                "Use an order that already has a generated label.",
+                "Open Order Summary → More Actions → Download Documents.",
+                "Extract ZIP and inspect the createShipment request/response JSON files.",
+            ),
+            verification_signals=(
+                "The ZIP contains label PDF and JSON request/response files.",
+                "JSON fields match the expected values (service code, options, dimensions).",
+            ),
+        )
+
+    # Dangerous goods (eParcel only)
+    if _has_any(s, ("dangerous goods", "dangerous good", "hazardous", " dg ")):
+        return ScenarioPrerequisitePlan(
+            category="product_special_service",
+            order_action="create_new",
+            label_flow="manual",
+            account_type="eparcel",
+            setup_steps=(
+                "Open AU Post App Products and enable Dangerous Goods on a simple product.",
+                "Create a fresh order using that product.",
+                "Generate a manual label and inspect the request JSON.",
+            ),
+            verification_signals=(
+                "Dangerous goods checkbox is saved on the product.",
+                "Shipment request contains the dangerous goods indicator.",
+            ),
+        )
+
+    # Signature on Delivery
+    if _has_any(s, ("signature on delivery", "signature required", "sign on delivery")):
+        return ScenarioPrerequisitePlan(
+            category="manual_label_sidedock",
+            order_action="create_new",
+            label_flow="manual",
+            account_type=account_type,
+            setup_steps=(
+                "Create a fresh unfulfilled order in the test store.",
+                "Open Shopify Orders → More Actions (button) → 'AU Post Generate Label' (link).",
+                "In the SideDock, click checkbox 'Request Signature?' BEFORE generating the label.",
+            ),
+            verification_signals=(
+                "Request Signature? checkbox is checked in the SideDock (iframe).",
+                "Request JSON contains options.signature_on_delivery = true.",
+            ),
+        )
+
+    # Authority to Leave
+    if _has_any(s, ("authority to leave", " atl ", "authority-to-leave")):
+        return ScenarioPrerequisitePlan(
+            category="manual_label_sidedock",
+            order_action="create_new",
+            label_flow="manual",
+            account_type=account_type,
+            setup_steps=(
+                "Create a fresh unfulfilled order in the test store.",
+                "Open Shopify Orders → More Actions (button) → 'AU Post Generate Label' (link).",
+                "In the SideDock, click checkbox 'Authority to Leave' BEFORE generating the label.",
+            ),
+            verification_signals=(
+                "Authority to Leave checkbox is checked in the SideDock (iframe).",
+                "Request JSON contains options.authority_to_leave = true.",
+            ),
+        )
+
+    # Extra Cover
+    if _has_any(s, ("extra cover", "extra-cover", "declared value", "insurance cover")):
+        max_cover = "$1,000" if account_type == "mypost_business" else "$5,000"
+        return ScenarioPrerequisitePlan(
+            category="manual_label_sidedock",
+            order_action="create_new",
+            label_flow="manual",
+            account_type=account_type,
+            setup_steps=(
+                "Create a fresh unfulfilled order in the test store.",
+                "Open Shopify Orders → More Actions (button) → 'AU Post Generate Label' (link).",
+                f"In the SideDock, click checkbox 'Insure package' → fill 'Declared Value' in dialog (max {max_cover} AUD).",
+            ),
+            verification_signals=(
+                "Extra Cover is enabled and declared value is entered.",
+                "Request JSON contains options.extra_cover.amount with the declared value.",
+            ),
+        )
+
+    # International shipping
+    if _has_any(s, ("international", "overseas", "new zealand", "usa", "canada", "plt", "international economy")):
+        return ScenarioPrerequisitePlan(
+            category="label_generation",
+            order_action="create_new",
+            label_flow=label_flow,
+            account_type="eparcel",
+            setup_steps=(
+                "Create a fresh unfulfilled international order (non-AU destination).",
+                "Open Shopify Orders → More Actions (button) → 'AU Post Generate Label' (link).",
+                "Select the international service (PLT / International Economy) and generate.",
+            ),
+            verification_signals=(
+                "International service options are available.",
+                "Request JSON items[0].product_id = 'PLT' for International Economy.",
+            ),
+        )
+
+    # Default: label generation
+    return ScenarioPrerequisitePlan(
+        category="label_generation",
+        order_action="create_new",
+        label_flow=label_flow,
+        account_type=account_type,
+        setup_steps=(
+            "Create a fresh unfulfilled domestic order in the test store.",
+            f"Open the {label_flow} label-generation flow from Shopify Orders.",
+        ),
+        verification_signals=(
+            "The required order exists before verification starts.",
+            "The label flow reaches the expected final state.",
+            "Request JSON reflects the expected service and options.",
+        ),
+    )
+
+
+def _is_deterministic_category(category: str) -> bool:
+    return category in {
+        "label_generation", "return_label", "existing_label_flow",
+        "product_config", "product_special_service",
+        "manual_label_sidedock", "settings_or_grid",
+    }
+
+
+def _heuristic_plan_data(scenario: str, app_url: str, ctx: str = "") -> dict:
+    """Return a heuristic nav plan (used when LLM planning returns empty nav_clicks)."""
+    plan = _build_prerequisite_plan(scenario)
+    look_for = list(plan.verification_signals) or ["Expected UI state is visible."]
+    api_to_watch: list[str] = ["/api/", "/labels", "/rates", "/shipment"]
+
+    if plan.category in ("label_generation", "manual_label_sidedock", "product_special_service"):
+        nav_clicks = ["Orders"]
+        if plan.needs_product_config:
+            nav_clicks = ["AppProducts", "Orders"]
+    elif plan.category in ("return_label", "existing_label_flow"):
+        nav_clicks = ["Shipping"]
+    elif plan.category == "product_config":
+        nav_clicks = ["AppProducts"]
+    elif plan.category == "settings_or_grid":
+        nav_clicks = ["Settings"]
+        api_to_watch = ["/api/", "/setting"]  # AU Post route is /setting (singular)
+    else:
+        nav_clicks = ["Shipping"]
+
+    s = scenario.lower()
+    if "extra cover" in s or "declared value" in s:
+        look_for.append("options.extra_cover.amount in request JSON")
+    if "signature" in s:
+        look_for.append("options.signature_on_delivery = true in request JSON")
+    if "authority to leave" in s or " atl " in s:
+        look_for.append("options.authority_to_leave = true in request JSON")
+    if "dangerous goods" in s:
+        look_for.append("dangerous goods indicator in request JSON")
+    if "parcel post" in s or "t28" in s:
+        look_for.append("items[0].product_id = 'T28' in request JSON")
+    if "express post" in s or "e86j" in s:
+        look_for.append("items[0].product_id = 'E86J' in request JSON")
+
+    return {
+        "nav_clicks": nav_clicks,
+        "look_for": look_for,
+        "api_to_watch": api_to_watch,
+        "plan": plan.setup_steps[0] if plan.setup_steps else f"Navigate to {plan.category} flow.",
+        "category": plan.category,
+        "label_flow": plan.label_flow,
+        "account_type": plan.account_type,
+    }
+
+
+# ── Test-case parsing and ranking ─────────────────────────────────────────────
+
+def parse_test_cases(test_cases_markdown: str) -> list[ParsedTestCase]:
+    """
+    Parse a markdown test-case table or numbered list into ParsedTestCase objects.
+    Supports: pipe-delimited tables, numbered lists, and plain bullet lists.
+    """
+    results: list[ParsedTestCase] = []
+    lines = (test_cases_markdown or "").splitlines()
+
+    # --- Table parser ---
+    in_table = False
+    header_cols: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            in_table = False
+            header_cols = []
+            continue
+        if line.startswith("|") and line.endswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if not in_table:
+                header_cols = [c.lower() for c in cells]
+                in_table = True
+                continue
+            if all(re.match(r"^[-:]+$", c) for c in cells if c):
+                continue
+            if not header_cols:
+                continue
+            row: dict[str, str] = {}
+            for i, col in enumerate(header_cols):
+                row[col] = cells[i] if i < len(cells) else ""
+            title = (
+                row.get("title") or row.get("test case") or row.get("tc")
+                or row.get("name") or row.get("scenario") or ""
+            ).strip()
+            desc = (
+                row.get("description") or row.get("steps") or row.get("ac")
+                or row.get("acceptance criteria") or row.get("details") or ""
+            ).strip()
+            if not title:
+                continue
+            tc_type = "Positive"
+            for k, v in row.items():
+                if "type" in k or "category" in k:
+                    tv = v.strip().lower()
+                    if "negative" in tv or "invalid" in tv:
+                        tc_type = "Negative"
+                    elif "edge" in tv or "boundary" in tv:
+                        tc_type = "Edge"
+                    break
+            combined = f"{title} {desc}".lower()
+            account_type = "mypost_business" if ("mypost" in combined or "my post business" in combined) else "eparcel"
+            execution_flow = "auto" if any(k in combined for k in (
+                "auto-generate", "auto generate", "download documents", "order summary",
+            )) else "manual"
+            results.append(ParsedTestCase(
+                title=title, description=desc, ac_text=desc or title,
+                account_type=account_type, execution_flow=execution_flow,
+                tc_type=tc_type,
+                priority_rank=3 if tc_type == "Positive" else (5 if tc_type == "Negative" else 7),
+                index=len(results),
+            ))
+            continue
+        else:
+            in_table = False
+            header_cols = []
+
+    if results:
+        return results
+
+    # --- List / numbered parser ---
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = re.match(r"^(?:\d+\.|[-•*])\s+(.+)$", line)
+        if m:
+            text = m.group(1).strip()
+            parts = text.split(":", 1)
+            title = parts[0].strip()
+            desc = parts[1].strip() if len(parts) > 1 else ""
+            if not title:
+                continue
+            combined = f"{title} {desc}".lower()
+            account_type = "mypost_business" if ("mypost" in combined or "my post business" in combined) else "eparcel"
+            tc_type = "Negative" if any(k in combined for k in (
+                "invalid", "exceed", "error", "fail", "cannot", "not allowed",
+            )) else "Positive"
+            execution_flow = "auto" if "auto-generate" in combined or "auto generate" in combined else "manual"
+            results.append(ParsedTestCase(
+                title=title, description=desc, ac_text=desc or title,
+                account_type=account_type, execution_flow=execution_flow,
+                tc_type=tc_type,
+                priority_rank=3 if tc_type == "Positive" else 5,
+                index=len(results),
+            ))
+
+    if results:
+        return results
+
+    # --- Fallback: whole block as one test case ---
+    text = (test_cases_markdown or "").strip()
+    if text:
+        results.append(ParsedTestCase(
+            title=text[:120], description=text, ac_text=text, index=0,
+        ))
+    return results
+
+
+def _is_browser_verifiable_test_case(tc: ParsedTestCase) -> bool:
+    """Return False for test cases that cannot be browser-verified."""
+    text = f"{tc.title} {tc.description}".lower()
+    skip = (
+        "manual test", "manual verification", "exploratory",
+        "load test", "performance test", "security test",
+        "unit test", "api test only",
+    )
+    return not any(k in text for k in skip)
+
+
+def rank_test_cases_for_execution(test_cases_markdown: str) -> list[ParsedTestCase]:
+    """Parse, filter, and rank test cases — positive before negative, lower priority_rank first."""
+    parsed = parse_test_cases(test_cases_markdown)
+    parsed = [tc for tc in parsed if _is_browser_verifiable_test_case(tc)]
+    type_rank = {"Positive": 0, "Negative": 1, "Edge": 2}
+    return sorted(
+        parsed,
+        key=lambda tc: (tc.priority_rank, type_rank.get(tc.tc_type, 3), tc.index),
+    )
+
+
+# ── Unified verification runner ───────────────────────────────────────────────
+
+def _run_verification_scenarios(
+    *,
+    app_url: str,
+    scenarios: list[str],
+    card_name: str,
+    card_id: str = "",
+    card_url: str = "",
+    qa_name: str = "QA Team",
+    progress_cb: "Callable[[int, str, int, str], None] | None" = None,
+    qa_answers: "dict[str, str] | None" = None,
+    auto_report_bugs: bool = True,
+    stop_flag: "Callable[[], bool] | None" = None,
+    feedback_query_text: str = "",
+    scenario_metadata: "dict[str, dict[str, str]] | None" = None,
+    shopify_email: str = "",
+    shopify_password: str = "",
+) -> VerificationReport:
+    """
+    Core browser verification loop — runs a list of scenario strings against the AU Post app.
+    Called by both verify_ac() and verify_test_cases().
+    """
+    def _emit(sidx: int, stitle: str, step: int, desc: str) -> None:
+        if progress_cb:
+            progress_cb(sidx, stitle, step, desc)
+
+    if not shopify_email:
+        shopify_email = os.getenv("USER_EMAIL", "")
+    if not shopify_password:
+        shopify_password = os.getenv("USER_PASSWORD", "")
+
+    if not app_url:
+        app_url = get_auto_app_url()
+    if not app_url:
+        raise ValueError("App URL required. Set STORE in .env or enter the URL manually.")
+    app_url = _normalize_app_base(app_url)
+    if not config.ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
+
+    claude = ChatAnthropic(
+        model=config.CLAUDE_SONNET_MODEL,
+        api_key=config.ANTHROPIC_API_KEY,
+        temperature=0.1,
+        max_tokens=4096,
+    )
+    report = VerificationReport(card_name=card_name, app_url=app_url)
+    _boot_label = scenarios[0] if scenarios else card_name
+    _emit(1, _boot_label, 0, "Loading Playwright runtime…")
+
+    from playwright.sync_api import sync_playwright
+    _emit(1, _boot_label, 0, "Playwright ready — launching browser…")
+
+    with sync_playwright() as p:
+        try:
+            _emit(1, _boot_label, 0, "Launching visible Google Chrome…")
+            browser = p.chromium.launch(channel="chrome", headless=False, args=_ANTI_BOT_ARGS, timeout=15_000)
+            logger.debug("SmartVerifier: launched real Chrome")
+        except Exception as e:
+            logger.warning("Chrome not found (%s) — falling back to Chromium", e)
+            _emit(1, _boot_label, 0, "Chrome stalled — falling back to Chromium…")
+            try:
+                browser = p.chromium.launch(headless=False, args=_ANTI_BOT_ARGS, timeout=15_000)
+            except Exception:
+                browser = p.chromium.launch(headless=True, args=_ANTI_BOT_ARGS, timeout=15_000)
+
+        _emit(1, _boot_label, 0, "Creating authenticated browser context…")
+        ctx = browser.new_context(**_auth_ctx_kwargs())
+        if _AUTH_JSON and not _AUTH_JSON.exists() and shopify_email and shopify_password:
+            _login_page = ctx.new_page()
+            _shopify_login(_login_page, shopify_email, shopify_password, app_url)
+            _login_page.close()
+            ctx.close()
+            ctx = browser.new_context(**_auth_ctx_kwargs())
+
+        page = ctx.new_page()
+        try:
+            _emit(1, _boot_label, 0, "Opening AU Post Shopify app…")
+            page.goto(app_url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(600)
+        except Exception as exc:
+            logger.warning("Initial app navigation failed; scenario navigation will retry: %s", exc)
+
+        for idx, scenario in enumerate(scenarios):
+            if _is_stop_requested(stop_flag):
+                logger.info("SmartVerifier: stopped by user after %d scenarios", idx)
+                break
+
+            logger.info("[%d/%d] Verifying: %s", idx + 1, len(scenarios), scenario[:70])
+            scenario_meta = (scenario_metadata or {}).get(scenario, {})
+            execution_flow_override = scenario_meta.get("execution_flow", "")
+
+            _emit(idx + 1, scenario, 0, "🧠 Asking domain expert…")
+            expert_insight = _ask_domain_expert(scenario, card_name, claude)
+            code_ctx = _code_context(scenario, card_name)
+            plan_data = _plan_scenario(scenario, app_url, code_ctx, expert_insight, claude)
+
+            # Fill in heuristic hints if LLM planning left nav_clicks empty
+            if not plan_data.get("nav_clicks"):
+                heuristic = _heuristic_plan_data(scenario, app_url, code_ctx)
+                for k, v in heuristic.items():
+                    if not plan_data.get(k):
+                        plan_data[k] = v
+
+            def _cb(step_num: int, desc: str, _i: int = idx, _sc: str = scenario) -> None:
+                if progress_cb:
+                    progress_cb(_i + 1, _sc, step_num, desc)
+
+            qa_ans = (qa_answers or {}).get(scenario, "")
+            sv = _verify_scenario(
+                page=page,
+                scenario=scenario,
+                card_name=card_name,
+                app_base=app_url,
+                plan_data=plan_data,
+                ctx=code_ctx,
+                claude=claude,
+                progress_cb=_cb,
+                qa_answer=qa_ans,
+                expert_insight=expert_insight,
+                first_scenario=(idx == 0),
+            )
+
+            if auto_report_bugs and sv.status in ("fail", "partial") and card_id:
+                _emit(idx + 1, scenario, MAX_STEPS, "🐛 Bug detected — notifying developer…")
+                try:
+                    from pipeline.bug_reporter import notify_devs_of_bug
+                    steps_taken = [
+                        f"{s.action}: {s.description}" for s in sv.steps
+                        if s.action in ("click", "fill", "navigate", "observe")
+                    ]
+                    bug_result = notify_devs_of_bug(
+                        card_id=card_id,
+                        card_name=card_name,
+                        card_url=card_url,
+                        bug_description=sv.verdict,
+                        scenario=scenario,
+                        qa_name=qa_name,
+                        verification_steps=steps_taken,
+                    )
+                    sv.bug_report = bug_result
+                except Exception as e:
+                    logger.warning("Bug auto-report failed: %s", e)
+                    sv.bug_report = {"ok": False, "error": str(e)}
+
+            report.scenarios.append(sv)
+
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        _close_browser_async(ctx, browser)
+
+    results_txt = "\n".join(
+        f"- [{sv.status.upper()}] {sv.scenario}: {sv.verdict}"
+        for sv in report.scenarios
+    )
+    try:
+        resp = _claude_invoke_with_retry(
+            claude,
+            [HumanMessage(content=_SUMMARY_PROMPT.format(card_name=card_name, results=results_txt))],
+            purpose="summary generation",
+        )
+        report.summary = resp.content.strip()
+    except Exception as exc:
+        logger.warning("Summary generation failed: %s", exc)
+        report.summary = f"{report.passed}/{len(report.scenarios)} scenarios passed."
+
+    return report
+
+
+def verify_test_cases(
+    app_url: str,
+    test_cases_markdown: str,
+    card_name: str,
+    card_id: str = "",
+    card_url: str = "",
+    qa_name: str = "QA Team",
+    progress_cb: "Callable[[int, str, int, str], None] | None" = None,
+    qa_answers: "dict[str, str] | None" = None,
+    auto_report_bugs: bool = True,
+    stop_flag: "Callable[[], bool] | None" = None,
+    max_test_cases: int | None = None,
+    shopify_email: str = "",
+    shopify_password: str = "",
+) -> VerificationReport:
+    """
+    Verify AU Post app behaviour against reviewed test cases (markdown table or list).
+
+    Parses and ranks test cases, then runs the agentic browser verification loop.
+    Both eParcel and MyPost Business test cases are handled by detecting account_type
+    from the scenario text.
+    """
+    if progress_cb:
+        progress_cb(1, card_name, 0, "Parsing reviewed test cases…")
+
+    ranked = rank_test_cases_for_execution(test_cases_markdown)
+    total_extracted = len(ranked)
+    if max_test_cases and max_test_cases < len(ranked):
+        ranked = ranked[:max_test_cases]
+        logger.info(
+            "SmartVerifier: capped to %d/%d test cases for '%s' (max_test_cases=%d)",
+            len(ranked), total_extracted, card_name, max_test_cases,
+        )
+    else:
+        logger.info("SmartVerifier: %d ranked test cases for '%s'", len(ranked), card_name)
+
+    scenarios = [tc.execution_text for tc in ranked]
+    if not scenarios:
+        logger.warning("verify_test_cases: no verifiable test cases parsed from markdown")
+        return VerificationReport(card_name=card_name, app_url=app_url, summary="No test cases parsed.")
+
+    if progress_cb:
+        progress_cb(1, scenarios[0], 0, "Preparing browser verification flow…")
+
+    scenario_metadata = {
+        tc.execution_text: {"execution_flow": tc.execution_flow}
+        for tc in ranked
+    }
+
+    return _run_verification_scenarios(
+        app_url=app_url,
+        scenarios=scenarios,
+        card_name=card_name,
+        card_id=card_id,
+        card_url=card_url,
+        qa_name=qa_name,
+        progress_cb=progress_cb,
+        qa_answers=qa_answers,
+        auto_report_bugs=auto_report_bugs,
+        stop_flag=stop_flag,
+        feedback_query_text=test_cases_markdown,
+        scenario_metadata=scenario_metadata,
+        shopify_email=shopify_email,
+        shopify_password=shopify_password,
+    )

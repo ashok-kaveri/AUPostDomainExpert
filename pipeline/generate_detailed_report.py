@@ -2,7 +2,7 @@
 generate_detailed_report.py
 ---------------------------
 Generates a detailed QA / Training report PDF for any Trello card.
-Matches the style of Detailed_Report.pdf (FedEx reference):
+Matches the style of Detailed_Report.pdf (AU Post reference):
 
   Cover → Section 1 (Promo Pitch) → Section 2 (Training + Test Cases)
         → Sign-Off Checklist → QA Notes

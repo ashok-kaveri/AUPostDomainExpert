@@ -785,3 +785,63 @@ def send_ac_dm(
     except Exception as e:
         logger.exception("DM send failed")
         return {"ok": False, "sent": 0, "failed": 0, "error": str(e)}
+
+
+def detect_toggles(
+    card_desc: str,
+    card_name: str = "",
+    card_comments: str = "",
+    *_extra: str,
+) -> list[str]:
+    """
+    Extract toggle / feature-flag names from a card.
+
+    Detects:
+      - Explicit "toggle:" labels (case-insensitive)
+      - Shopify feature flags (shopify.feature.* or shopify.webhook.*)
+      - Common flag patterns ("enable X toggle", "X flag", "X feature flag")
+
+    Returns a deduplicated list of toggle names (human-readable).
+    """
+    import re as _re
+    toggles: list[str] = []
+    seen: set[str] = set()
+
+    text = "\n".join(part for part in [card_name, card_desc, card_comments] if part)
+
+    # Pattern 1 — explicit "toggle: <name>" label
+    for m in _re.finditer(r'toggle[:\s]+([^\n"]{3,80})', text, _re.IGNORECASE):
+        name = m.group(1).strip().strip('"').strip("'").rstrip(",")
+        if name and name.lower() not in seen:
+            toggles.append(name)
+            seen.add(name.lower())
+
+    # Pattern 2 — Shopify feature flag JSON keys
+    for m in _re.finditer(
+        r'"((?:all\.myshopify\.com\.)?shopify\.(?:webhook|feature)[^"]{5,120})"',
+        text,
+    ):
+        raw = m.group(1)
+        readable = (
+            raw.replace("all.myshopify.com.", "")
+               .replace("shopify.webhook.", "")
+               .replace("shopify.feature.", "")
+               .replace(".", " ")
+               .strip()
+        )
+        if readable.lower() not in seen:
+            toggles.append(readable)
+            seen.add(readable.lower())
+
+    # Pattern 3 — "enable X toggle" / "X flag" / "X feature flag"
+    for m in _re.finditer(
+        r'\b(?:enable|activate|turn on|add)\s+["\']?([A-Za-z0-9 _\-]{4,60}?)["\']?\s+'
+        r'(?:toggle|flag|feature flag)\b',
+        text, _re.IGNORECASE,
+    ):
+        name = m.group(1).strip()
+        if name.lower() not in seen:
+            toggles.append(name)
+            seen.add(name.lower())
+
+    return toggles

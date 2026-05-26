@@ -18,18 +18,19 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_SOURCES = ["pluginhive_docs", "pluginhive_seeds", "sheets", "codebase", "wiki", "app"]
+_DEFAULT_SOURCES = ["pluginhive_docs", "pluginhive_seeds", "sheets", "codebase", "wiki", "app", "aupost_api"]
 # pluginhive_docs  — Official PluginHive AU Post app setup guide (product docs, UX flows, FAQ)
 # pluginhive_seeds — Seed URL scrape of AU Post knowledge base and guide pages
 # sheets           — eParcel + MyPost Business test cases (Google Sheets)
 # codebase         — Playwright TypeScript automation codebase
 # wiki             — Internal AU Post wiki markdown knowledge base
 # app              — Live AU Post app UI knowledge (inline + manual + browser capture)
+# aupost_api       — Australia Post REST API knowledge (service codes, request/response fields)
 # pluginhive       — Full PluginHive web scrape (excluded by default — large)
 # shopify          — Shopify App Store listing
 
 
-def run_ingest(sources: list[str] | None = None) -> None:
+def run_ingest(sources: list[str] | None = None, clear: bool | None = None) -> None:
     from rag.vectorstore import clear_collection, add_documents
     from ingest.web_scraper import scrape_pluginhive_docs, scrape_pluginhive_seeds_only, scrape_shopify_app_store
     from ingest.codebase_loader import load_codebase
@@ -38,16 +39,26 @@ def run_ingest(sources: list[str] | None = None) -> None:
     from ingest.pluginhive_app_docs import load_pluginhive_app_docs
     from ingest.wiki_loader import load_wiki_docs
     from ingest.app_navigator import load_app_knowledge
+    from ingest.aupost_api import load_aupost_api_docs
 
     active_sources = sources if sources is not None else _DEFAULT_SOURCES
+    # Only clear the collection on a full rebuild (all default sources).
+    # Partial --sources runs are ADDITIVE so they don't wipe existing domain knowledge.
+    if clear is None:
+        should_clear = (set(active_sources) >= set(_DEFAULT_SOURCES))
+    else:
+        should_clear = clear
     start = time.time()
 
     print("=" * 60)
     print("AU Post Domain Expert — Knowledge Base Ingestion")
     print(f"Sources: {', '.join(active_sources)}")
     print("=" * 60)
-    logger.info("Clearing existing knowledge base...")
-    clear_collection()
+    if should_clear:
+        logger.info("Clearing existing knowledge base...")
+        clear_collection()
+    else:
+        logger.info("Partial ingest — appending to existing knowledge base (no clear)")
 
     all_documents = []
 
@@ -83,6 +94,10 @@ def run_ingest(sources: list[str] | None = None) -> None:
         logger.info("Loading AU Post app UI knowledge (inline + captured content)…")
         all_documents.extend(load_app_knowledge())
 
+    if "aupost_api" in active_sources:
+        logger.info("Loading Australia Post REST API knowledge…")
+        all_documents.extend(load_aupost_api_docs())
+
     if not all_documents:
         logger.error("No documents loaded. Check your sources and try again.")
         sys.exit(1)
@@ -100,8 +115,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sources",
         nargs="*",
-        choices=["pluginhive", "pluginhive_seeds", "shopify", "pluginhive_docs", "codebase", "sheets", "pdf", "wiki", "app"],
+        choices=["pluginhive", "pluginhive_seeds", "shopify", "pluginhive_docs", "codebase", "sheets", "pdf", "wiki", "app", "aupost_api"],
         help="Which sources to ingest (default: all)",
     )
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        default=None,
+        help="Force-clear the collection before ingesting (default: auto — clear only on full rebuild)",
+    )
+    parser.add_argument(
+        "--no-clear",
+        dest="clear",
+        action="store_false",
+        help="Never clear the collection (always append)",
+    )
     args = parser.parse_args()
-    run_ingest(args.sources)
+    run_ingest(args.sources, clear=args.clear)

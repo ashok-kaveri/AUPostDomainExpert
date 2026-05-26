@@ -56,9 +56,9 @@ POM_REGISTRY: list[dict] = [
         "class": "AdditionalServices",
         "fixture": "additionalServices",
         "keywords": [
-            "dry ice", "duties", "tax", "signature", "saturday delivery",
-            "one rate", "alcohol", "dangerous goods", "hold at location",
-            "additional service", "adult signature",
+            "signature on delivery", "authority to leave", "atl", "safe drop",
+            "extra cover", "dangerous goods", "declared value",
+            "additional service", "settings",
         ],
         "nav": "Settings > Additional Services",
         "app_path": "settings/additional-services",
