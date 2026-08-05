@@ -81,6 +81,8 @@ Index page rules:
 
 Do not add a `How Support Should Use This Package` section. The index page is followed directly by the first card section.
 
+Every story card section starts on a new PDF page, including the first — the index page stands alone. `render_pdf_bytes` inserts the page breaks automatically, so do not hand-place page breaks or filler.
+
 ## Business Brief Sections
 
 1. **Feature Headline** — one-line feature name
