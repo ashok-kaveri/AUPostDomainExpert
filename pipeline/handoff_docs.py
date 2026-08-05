@@ -34,6 +34,40 @@ def is_request_log_callout(markdown_line: str) -> bool:
 # "ZI-651 - WSS order updates not syncing" or "941 - Add DAP Incoterm option".
 CARD_SECTION_HEADING_RE = re.compile(r"^(?:[A-Z]{1,4}-\d{1,5}|\d{1,6})\s+-\s+\S")
 
+# H2s that belong to the package itself rather than to a story card.
+PACKAGE_LEVEL_HEADINGS = frozenset({
+    "included story cards",
+    "included updates",
+    "release overview",
+    "availability",
+    "how support should use this package",
+})
+
+
+def is_card_section_heading(heading_text: str, combined_package: bool = False) -> bool:
+    """Return true when a heading starts a new story-card section.
+
+    Inside a combined package every H2 except the package-level ones is a card,
+    because each card's own sections were demoted to H3. That matters for cards
+    whose title carries no story id (for example "[F-DIM] Bulk Edit ..."), which
+    an id pattern alone would miss and leave sharing a page with the card above.
+    """
+    text = (heading_text or "").strip()
+    if not text or text.lower().rstrip(":") in PACKAGE_LEVEL_HEADINGS:
+        return False
+    if CARD_SECTION_HEADING_RE.match(text):
+        return True
+    return combined_package
+
+
+def is_combined_package(markdown_lines: list[str]) -> bool:
+    """True when the document is a release package with an index page."""
+    return any(
+        line.strip().lower() in ("## included story cards", "## included updates")
+        for line in markdown_lines or []
+    )
+
+
 @dataclass
 class HandoffDocContext:
     card_id: str
@@ -975,6 +1009,7 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
     seen_card_marker = False
     seen_page_h1 = False
     seen_card_section = False
+    combined_package = is_combined_package(content_lines)
 
     def _maybe_flush():
         if table_buf:
@@ -1041,7 +1076,7 @@ def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
             heading = clean[3:].strip()
             # Every story card starts on its own page — including the first, so the
             # index page stands alone and no card begins halfway down another page.
-            if is_card_section_heading(heading):
+            if is_card_section_heading(heading, combined_package):
                 story.append(PageBreak())
                 seen_card_section = True
             story.extend(_h2_row(heading))
