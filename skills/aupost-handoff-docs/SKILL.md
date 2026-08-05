@@ -44,21 +44,46 @@ If some inputs are missing, generate a useful draft but mark unknown fields clea
 ## Support Guide Sections
 
 1. **Release Details** — Feature Reference, Trello card URL, Release, Approved, Developed by, Tested by
-2. **Feature Summary** — What changed / what was added (plain English)
+2. **Brief Description** — What changed / what was added (plain English, very crisp)
 3. **Account Type Coverage** — eParcel / MyPost Business / Both — always be explicit
 4. **Toggles & Prerequisites** — whether any toggle is needed; "None required" if not
 5. **Where to Find** — exact app path from the navigation map in the reference file
 6. **Walkthrough** — step-by-step guide using exact button/link names from the reference file
 7. **Expected Behaviour** — what support should observe (status badge, JSON field, UI change)
-8. **Business-Safe Explanation** — plain English for merchant-facing communication
-9. **Q&A** — common questions support may face
-10. **Known Limitations** — eParcel vs MyPost Business differences, any known gaps
-11. **References** — Trello card URL, PluginHive docs links
+
+Do not add `Business-Safe Explanation`, `Merchant-Safe Explanation`, `Q&A` / `Common Questions & Troubleshooting`, `Support Escalation Packet`, `Known Limitations` / `Rollout Notes`, or `References` sections. The document ends after `Expected Behaviour`.
+
+Account-type limits (eParcel vs MyPost Business) still belong in `Account Type Coverage`, not in a separate limitations section.
+
+## Multi-Card Release Package Structure
+
+When the user asks for a combined release package, start with the index page and go straight into the card sections:
+
+```markdown
+# <Release> Support Guide
+
+## Included Story Cards
+| Story ID | Story Title | Toggle Name |
+|---|---|---|
+
+## <Story ID> - <Card title>
+### Brief Description
+...
+```
+
+Index page rules:
+
+- use exactly three columns: `Story ID`, `Story Title`, `Toggle Name`
+- `Story ID` is the story/card number only
+- `Story Title` is the card title
+- `Toggle Name` is the exact toggle name, or `None` when the card needs no toggle
+
+Do not add a `How Support Should Use This Package` section. The index page is followed directly by the first card section.
 
 ## Business Brief Sections
 
 1. **Feature Headline** — one-line feature name
-2. **The Problem** — 2-3 sentences on what was broken/missing
+2. **Brief Description** — 2-3 sentences on what was broken/missing
 3. **What's New** — 3-5 bullet points (action verbs, no jargon)
 4. **Who Benefits** — 2-3 merchant scenarios
 5. **Why It Matters** — 2-3 sentences on business value
@@ -81,7 +106,14 @@ If some inputs are missing, generate a useful draft but mark unknown fields clea
 
 ## PDF Rendering
 
-Use `pipeline.handoff_docs.render_pdf_bytes` if PDF export is requested.
+When the user asks for PDF:
+
+1. Generate the markdown first.
+2. Save the markdown under `data/handoff_docs/`.
+3. Render PDF using:
+   `skills/aupost-handoff-docs/scripts/render_handoff_pdf.py`
+
+This wraps `pipeline.handoff_docs.render_pdf_bytes`, which uses the shared PluginHive handoff styling — the same header panel, palette, tables, and footer as the MCSL and FedEx handoff PDFs.
 
 ## Final Response
 

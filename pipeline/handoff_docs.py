@@ -19,6 +19,17 @@ from pipeline.slack_client import detect_toggles
 logger = logging.getLogger(__name__)
 
 
+REQUEST_LOG_CALLOUT_RE = re.compile(
+    r"^[-*]\s*(?:Request node|Request nodes|Request/response nodes|Request/log fields) to verify:",
+    flags=re.IGNORECASE,
+)
+
+
+def is_request_log_callout(markdown_line: str) -> bool:
+    """Return true when a markdown bullet should render as a request/log callout."""
+    return bool(REQUEST_LOG_CALLOUT_RE.match((markdown_line or "").strip()))
+
+
 @dataclass
 class HandoffDocContext:
     card_id: str
@@ -290,17 +301,23 @@ Write a practical, support/demo-friendly document in markdown.
 
 Requirements:
 - Clear title
-- Short feature summary
+- `## Brief Description` — a short, crisp summary of what changed and why it matters
 - Developed by
 - Tested by
 - Toggle / prerequisite section
 - Where to find the feature in the app (use exact paths from APP NAVIGATION STRUCTURE or code context)
 - Step-by-step walkthrough for support/demo team (use exact button/link names from code or AI QA evidence)
 - Expected behaviour / what support should observe
-- Business-safe explanations (support-friendly, not code jargon heavy)
-- Common questions / troubleshooting
-- Known limitations / rollout notes
-- References section with Trello link when available
+
+The document ends after the expected-behaviour section.
+
+DO NOT include any of the following sections:
+- Feature Summary (use `## Brief Description` instead)
+- Business-Safe Explanation / Merchant-Safe Explanation (any merchant-facing wording section)
+- Common Questions / Troubleshooting (or any Q&A section)
+- Support Escalation Packet
+- Known Limitations / Rollout Notes
+- References
 
 NAVIGATION RULE (CRITICAL):
 Use this priority order to write "Where to Find" and "Walkthrough" sections:
@@ -312,7 +329,7 @@ Use this priority order to write "Where to Find" and "Walkthrough" sections:
 UNKNOWN NAVIGATION RULE (CRITICAL):
 If you cannot determine exact navigation steps for a section from ANY source in the context:
 - Do NOT guess or invent steps
-- Add a ⚠️ QA NOTE block at the TOP of the document (before Feature Summary), formatted exactly as:
+- Add a ⚠️ QA NOTE block at the TOP of the document (before Brief Description), formatted exactly as:
 
 ---
 > ⚠️ **QA NOTE — Navigation Confirmation Needed**
@@ -361,7 +378,7 @@ _BUSINESS_PROMPT = """You are a product marketing writer. Write a concise, visua
 
 ---
 
-### 🔍 The Problem
+### 🔍 Brief Description
 2–3 sentences. What frustration or inefficiency did merchants face before this? Make it relatable and concrete — describe the pain, not the technical gap.
 
 ---
@@ -466,7 +483,7 @@ def _fallback_support_doc(ctx: HandoffDocContext) -> str:
     testers = ", ".join(ctx.tester_names) if ctx.tester_names else "QA Team"
     return f"""# Support Guide — {ctx.card_name}
 
-## Summary
+## Brief Description
 This document helps the support/demo team understand and explain the feature.
 
 ## Ownership
@@ -488,9 +505,6 @@ This document helps the support/demo team understand and explain the feature.
 ## Support Notes
 - Review the Trello card and approved test cases before demoing.
 - If toggles are required, confirm store enablement first.
-
-## References
-- Trello: {ctx.card_url or 'N/A'}
 """
 
 
@@ -501,7 +515,7 @@ def _fallback_business_doc(ctx: HandoffDocContext) -> str:
 ## Value Statement
 This change improves merchant workflow and support readiness for the Australia Post feature.
 
-## Problem
+## Brief Description
 {(ctx.card_description or ctx.acceptance_criteria or 'Problem statement not available').strip()[:1800]}
 
 ## What Changed
@@ -514,9 +528,6 @@ This change improves merchant workflow and support readiness for the Australia P
 ## Support / Rollout Impact
 - Support team should use the support guide for demo and troubleshooting.
 - Confirm toggle or rollout prerequisites before enabling for merchants.
-
-## References
-- Trello: {ctx.card_url or 'N/A'}
 """
 
 
@@ -601,251 +612,471 @@ def generate_business_brief(ctx: HandoffDocContext) -> str:
         return _fallback_business_doc(ctx)
 
 
-def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
-    """
-    Render a markdown string to a polished, branded PDF.
-    Handles **bold**, *italic*, `code`, bullet lists, headings,
-    --- dividers, and emoji section headers.
-    """
+def _register_fonts() -> tuple[str, str]:
+    """Register Arial + Georgia TTF fonts. Returns (sans_family, serif_family)."""
     try:
-        from reportlab.lib import colors as _rl_colors
-        from reportlab.lib.colors import HexColor, white
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.pdfbase.pdfmetrics import registerFontFamily
+
+        _SF = "/System/Library/Fonts/Supplemental/"
+        pdfmetrics.registerFont(TTFont("Arial",           _SF + "Arial.ttf"))
+        pdfmetrics.registerFont(TTFont("Arial-Bold",      _SF + "Arial Bold.ttf"))
+        pdfmetrics.registerFont(TTFont("Arial-Italic",    _SF + "Arial Italic.ttf"))
+        pdfmetrics.registerFont(TTFont("Arial-BoldItalic",_SF + "Arial Bold Italic.ttf"))
+        registerFontFamily("Arial", normal="Arial", bold="Arial-Bold",
+                           italic="Arial-Italic", boldItalic="Arial-BoldItalic")
+
+        pdfmetrics.registerFont(TTFont("Georgia",           _SF + "Georgia.ttf"))
+        pdfmetrics.registerFont(TTFont("Georgia-Bold",      _SF + "Georgia Bold.ttf"))
+        pdfmetrics.registerFont(TTFont("Georgia-Italic",    _SF + "Georgia Italic.ttf"))
+        pdfmetrics.registerFont(TTFont("Georgia-BoldItalic",_SF + "Georgia Bold Italic.ttf"))
+        registerFontFamily("Georgia", normal="Georgia", bold="Georgia-Bold",
+                           italic="Georgia-Italic", boldItalic="Georgia-BoldItalic")
+        return "Arial", "Georgia"
+    except Exception:
+        return "Helvetica", "Times-Roman"
+
+
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FFFF\U00002600-\U000027BF\U0000FE00-\U0000FE0F]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_emoji(text: str) -> str:
+    """Drop emoji — the embedded PDF fonts render them as blank boxes."""
+    return _EMOJI_RE.sub("", text or "").strip()
+
+
+def _md_to_rl(text: str, sans: str = "Arial") -> str:
+    """Convert basic markdown inline formatting to ReportLab XML tags."""
+    text = _strip_emoji(text)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Markdown links [label](url) → clickable ReportLab anchors. Do this first so the
+    # label/url (which never contain markdown emphasis) survive the asterisk handling.
+    def _link(m):
+        label, url = m.group(1), m.group(2)
+        return f'<a href="{url}" color="#1155CC">{label}</a>'
+    text = re.sub(r'\[([^\]]+)\]\(([^)\s]+)\)', _link, text)
+    text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
+    text = re.sub(r'\*\*(.+?)\*\*',     r'<b>\1</b>', text)
+    text = re.sub(r'\*(.+?)\*',         r'<i>\1</i>', text)
+    text = re.sub(r'`(.+?)`',           r'<font name="Courier" fontSize="9">\1</font>', text)
+    # Strip any unmatched asterisks left over (e.g. from BDD steps bleeding in)
+    text = re.sub(r'\*+', '', text)
+    return text
+
+
+# Brand line shown under the PDF title. Keep the handoff PDF styling identical
+# across the MCSL / FedEx / AU Post repos — only this brand string differs.
+PDF_BRAND = "PluginHive Australia Post"
+
+
+def _pdf_subtitle(title: str, markdown_text: str) -> str:
+    """Brand + platform scope line for the PDF header panel."""
+    return "  ·  ".join([PDF_BRAND, "Shopify"])
+
+
+def render_pdf_bytes(title: str, markdown_text: str) -> bytes:
+    try:
+        from reportlab.lib.colors import HexColor
         from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.lib.units import inch, mm
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import inch
         from reportlab.platypus import (
-            HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+            HRFlowable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
         )
     except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "PDF export requires the optional 'reportlab' dependency."
-        ) from exc
+        raise RuntimeError("PDF rendering requires reportlab to be installed") from exc
 
-    # ── Brand palette ────────────────────────────────────────────
-    NAVY      = HexColor("#1B2D4F")   # deep navy – header banner
-    ACCENT    = HexColor("#2563A8")   # medium blue – section headers & accents
-    LIGHT_BG  = HexColor("#EEF3FA")   # pale blue – tagline box
-    RULE      = HexColor("#C8D6EA")   # subtle divider line
-    BODY_COL  = HexColor("#2C3E50")   # body text
-    MUTED     = HexColor("#6B7E99")   # footer / meta text
-    BULLET_BG = HexColor("#D9E5F5")   # bullet left-bar background
+    SANS, SERIF = _register_fonts()
 
-    # ── Page geometry ────────────────────────────────────────────
     PAGE_W, PAGE_H = A4
-    LM = RM = 0.65 * inch
-    CONTENT_W = PAGE_W - LM - RM
+    LM = RM = 0.7 * inch
+    CW = PAGE_W - LM - RM
 
+    # ── Professional navy / gold colour palette ──────────────────────────────
+    C_NAVY      = HexColor("#0d1b3e")   # header background — deep navy
+    C_NAVY_MID  = HexColor("#162447")   # header body rows
+    C_NAVY_META = HexColor("#1a2f5e")   # metadata strip
+    C_GOLD      = HexColor("#c9922a")   # badge label & subtitle — warm gold
+    C_BLUE      = HexColor("#1d4ed8")   # section headings — royal blue
+    C_ACCENT    = HexColor("#2563eb")   # left accent bar
+    C_WHITE     = HexColor("#ffffff")
+    C_HDR_DESC  = HexColor("#cbd5e1")   # header description text
+    C_META_TXT  = HexColor("#94a3b8")   # metadata strip text
+    C_TEXT      = HexColor("#1e293b")   # body text — rich charcoal
+    C_GRAY      = HexColor("#475569")   # secondary / quote text
+    C_BORDER    = HexColor("#e2e8f0")   # dividers & table borders
+
+    def _ps(name, **kw):
+        return ParagraphStyle(name, **kw)
+
+    # Fonts: Georgia for the big title impact, Arial everywhere else
+    hdr_badge  = _ps("HBadge", fontName=f"{SANS}-Bold",   fontSize=8.5, leading=11, textColor=C_GOLD,
+                               spaceAfter=2, tracking=60)
+    hdr_title  = _ps("HTitle", fontName=f"{SERIF}-Bold",  fontSize=26,  leading=32, textColor=C_WHITE,
+                               spaceAfter=4)
+    hdr_sub    = _ps("HSub",   fontName=f"{SANS}-Bold",   fontSize=10.5,leading=14, textColor=C_GOLD,
+                               spaceAfter=0)
+    hdr_desc   = _ps("HDesc",  fontName=f"{SANS}-Italic", fontSize=10,  leading=14, textColor=C_HDR_DESC)
+    hdr_meta   = _ps("HMeta",  fontName=SANS,             fontSize=8.5, leading=12, textColor=C_META_TXT)
+    h2_style   = _ps("H2",     fontName=f"{SANS}-Bold",   fontSize=12,  leading=16, textColor=C_BLUE,
+                               spaceBefore=12, spaceAfter=2)
+    h3_style   = _ps("H3",     fontName=f"{SANS}-BoldItalic", fontSize=11, leading=14, textColor=C_BLUE,
+                               spaceBefore=8, spaceAfter=3)
+    body_style = _ps("Body",   fontName=SANS,             fontSize=10.5, leading=16, textColor=C_TEXT,
+                               spaceAfter=6)
+    bullet_sty = _ps("Bullet", fontName=SANS,             fontSize=10.5, leading=16, textColor=C_TEXT,
+                               spaceAfter=4, leftIndent=16)
+    num_style  = _ps("Num",    fontName=SANS,             fontSize=10.5, leading=16, textColor=C_TEXT,
+                               spaceAfter=4, leftIndent=18)
+    quote_sty  = _ps("Quote",  fontName=f"{SERIF}-Italic",fontSize=10.5, leading=16, textColor=C_GRAY,
+                               leftIndent=20, rightIndent=20, spaceAfter=8,
+                               borderPadding=(6, 10, 6, 14),
+                               borderColor=C_GOLD, borderWidth=0)
+
+    # ── H2 with left royal-blue accent bar ──────────────────────────────────
+    def _h2_row(text: str):
+        bar = Table([[""]], colWidths=[4], rowHeights=[18])
+        bar.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), C_ACCENT),
+            ("TOPPADDING",    (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+        ]))
+        p = Paragraph(_md_to_rl(text), h2_style)
+        row = Table([[bar, p]], colWidths=[6, CW - 6])
+        row.setStyle(TableStyle([
+            ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING",    (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+            ("LEFTPADDING",   (0, 1), (0, 1), 9),
+        ]))
+        return [row, HRFlowable(width=CW, thickness=0.5, color=C_BORDER, spaceAfter=5)]
+
+    # ── Badge / subtitle detection ───────────────────────────────────────────
+    tl = title.lower()
+    if any(w in tl for w in ["delay", "fix", "bug", "error", "performance", "slow", "issue"]):
+        badge_txt = "PERFORMANCE FIX"
+    elif any(w in tl for w in ["new", "feature", "add", "introduc", "launch"]):
+        badge_txt = "NEW FEATURE"
+    else:
+        badge_txt = "UPDATE"
+
+    clean_title = re.sub(r'\[#\d+\]', '', title).strip()
+    clean_title = re.sub(r'From SL:\s*[A-Z]+-\d+\s*[—–-]\s*', '', clean_title).strip()
+
+    subtitle = _pdf_subtitle(title, markdown_text)
+
+    # ── Parse markdown ───────────────────────────────────────────────────────
+    lines = (markdown_text or "").splitlines()
+    content_lines: list[str] = []
+    desc_text = ""
+    skip_h1 = True
+    for line in lines:
+        if skip_h1 and line.startswith("# "):
+            skip_h1 = False
+            continue
+        content_lines.append(line)
+        if not desc_text:
+            s = line.strip()
+            if s and not s.startswith("#") and not s.startswith("-"):
+                desc_text = s[:170] + ("…" if len(s) > 170 else "")
+
+    # ── Canvas footer ────────────────────────────────────────────────────────
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(
+
+    def _draw_footer(canvas_obj, doc):
+        canvas_obj.saveState()
+        # Thin gold rule above footer
+        canvas_obj.setStrokeColor(C_GOLD)
+        canvas_obj.setLineWidth(0.5)
+        canvas_obj.line(LM, 26, PAGE_W - RM, 26)
+        canvas_obj.setFillColor(C_GRAY)
+        canvas_obj.setFont(SANS, 7.5)
+        canvas_obj.drawString(LM, 12, f"Generated {_dt.datetime.now().strftime('%B %d, %Y')}  ·  Confidential — PluginHive")
+        canvas_obj.drawCentredString(PAGE_W / 2, 12, f"Page {doc.page}")
+        canvas_obj.drawRightString(PAGE_W - RM, 12, "pluginhive.com")
+        canvas_obj.restoreState()
+
+    doc_obj = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=LM, rightMargin=RM,
-        topMargin=0.35 * inch, bottomMargin=0.55 * inch,
+        topMargin=0.4 * inch, bottomMargin=0.5 * inch,
         title=title,
     )
 
-    # ── Styles ───────────────────────────────────────────────────
-    base = getSampleStyleSheet()
+    story: list = []
 
-    def _ps(name, **kw):
-        parent = kw.pop("parent", base["Normal"])
-        return ParagraphStyle(name, parent=parent, **kw)
+    # ── Header panel (deep navy) ─────────────────────────────────────────────
+    badge_p = Paragraph(badge_txt, hdr_badge)
+    title_p = Paragraph(clean_title, hdr_title)
+    sub_p   = Paragraph(subtitle, hdr_sub)
+    desc_p  = Paragraph(_md_to_rl(desc_text), hdr_desc) if desc_text else Spacer(1, 2)
 
-    BANNER_DOC   = _ps("BannerDoc",   fontName="Helvetica", fontSize=8,
-                        textColor=HexColor("#A8BFD8"), leading=10)
-    BANNER_TITLE = _ps("BannerTitle", fontName="Helvetica-Bold", fontSize=15,
-                        textColor=white, leading=19)
-    TAGLINE      = _ps("Tagline",     fontName="Helvetica-Oblique", fontSize=10.5,
-                        textColor=NAVY, leading=15, leftIndent=4, rightIndent=4)
-    H2           = _ps("H2",          fontName="Helvetica-Bold", fontSize=11.5,
-                        textColor=ACCENT, leading=15, spaceBefore=10, spaceAfter=3)
-    H3           = _ps("H3",          fontName="Helvetica-Bold", fontSize=10.5,
-                        textColor=NAVY, leading=14, spaceBefore=8, spaceAfter=2)
-    BODY         = _ps("Body",        fontName="Helvetica", fontSize=10,
-                        textColor=BODY_COL, leading=14.5, spaceAfter=4)
-    BULLET       = _ps("Bullet",      parent=BODY, leftIndent=18, firstLineIndent=0,
-                        spaceBefore=2, spaceAfter=3,
-                        bulletColor=ACCENT, bulletFontSize=11)
-    FOOTER       = _ps("Footer",      fontName="Helvetica", fontSize=7.5,
-                        textColor=MUTED, alignment=1, leading=10)
-
-    # ── Helpers ──────────────────────────────────────────────────
-    _EMOJI_RE = re.compile(
-        "[\U0001F300-\U0001FFFF"   # misc symbols & pictographs
-        "\U00002600-\U000027BF"    # misc symbols
-        "\U0000FE00-\U0000FE0F"    # variation selectors
-        "]+",
-        flags=re.UNICODE,
-    )
-
-    def _strip_emoji(text: str) -> str:
-        return _EMOJI_RE.sub("", text).strip()
-
-    def _esc(t: str) -> str:
-        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    def _inline(text: str) -> str:
-        """Convert markdown inline markup → ReportLab XML tags."""
-        t = _esc(_strip_emoji(text))
-        t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
-        t = re.sub(r"\*(.+?)\*",     r"<i>\1</i>",  t)
-        t = re.sub(r"`(.+?)`",       r"<font name='Courier'>\1</font>", t)
-        return t.strip()
-
-    def _section_bar(heading_text: str) -> Table:
-        """Return a table that looks like:  [blue bar] [bold heading text]"""
-        return Table(
-            [[Paragraph("", BODY), Paragraph(_inline(heading_text), H2)]],
-            colWidths=[4 * mm, CONTENT_W - 4 * mm],
-            hAlign="LEFT",
-        )
-
-    def _tagline_box(text: str) -> Table:
-        return Table(
-            [[Paragraph(_inline(text), TAGLINE)]],
-            colWidths=[CONTENT_W],
-        )
-
-    def _rule(thickness=0.5, color=RULE, space_before=4, space_after=4):
-        return HRFlowable(
-            width="100%", thickness=thickness, color=color,
-            spaceBefore=space_before, spaceAfter=space_after,
-        )
-
-    # ── Header banner ────────────────────────────────────────────
-    story = []
-
-    parts = title.split("—", 1)
-    doc_type     = parts[0].strip() if len(parts) > 1 else "Document"
-    feature_name = parts[1].strip() if len(parts) > 1 else title
-
-    banner = Table(
-        [[
-            Paragraph(_esc(doc_type).upper(), BANNER_DOC),
-            Paragraph(_esc(feature_name),     BANNER_TITLE),
-        ]],
-        colWidths=[1.05 * inch, CONTENT_W - 1.05 * inch],
-    )
-    banner.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (0, 0), ACCENT),
-        ("BACKGROUND",    (1, 0), (1, 0), NAVY),
-        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN",         (0, 0), (0, 0), "CENTER"),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
-        ("TOPPADDING",    (0, 0), (-1, -1), 14),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+    hdr_tbl = Table([[badge_p], [title_p], [sub_p], [desc_p]], colWidths=[CW])
+    hdr_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), C_NAVY_MID),
+        ("BACKGROUND",    (0, 0), (0, 0),   C_NAVY),
+        ("TOPPADDING",    (0, 0), (0, 0), 18),
+        ("BOTTOMPADDING", (0, 0), (0, 0),  4),
+        ("TOPPADDING",    (0, 1), (0, 1),  4),
+        ("BOTTOMPADDING", (0, 1), (0, 1),  6),
+        ("TOPPADDING",    (0, 2), (0, 2),  2),
+        ("BOTTOMPADDING", (0, 2), (0, 2),  8),
+        ("TOPPADDING",    (0, 3), (0, 3),  2),
+        ("BOTTOMPADDING", (0, 3), (0, 3), 18),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 22),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 22),
     ]))
-    story.append(banner)
-    story.append(Spacer(1, 8))
 
-    # ── Parse markdown ───────────────────────────────────────────
-    lines = markdown_text.splitlines()
-    idx = 0
-    while idx < len(lines):
-        raw  = lines[idx]
-        line = raw.strip()
-        idx += 1
+    # Gold top-border accent line on header
+    hdr_border = Table([[""]], colWidths=[CW], rowHeights=[3])
+    hdr_border.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), C_GOLD),
+        ("TOPPADDING",    (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+    ]))
 
-        # Skip blank / title line that duplicates the banner
-        if not line:
-            story.append(Spacer(1, 3))
-            continue
-
-        # Hard rules → thin visual spacer only
-        if re.fullmatch(r"[-*_]{3,}", line):
-            story.append(_rule(space_before=2, space_after=2))
-            continue
-
-        # H1 (# …) → skip; already in banner
-        if line.startswith("# "):
-            continue
-
-        # H2 (## …) or H3 (### …) → coloured section header
-        if line.startswith("### "):
-            text = line[4:].strip()
-            bar = _section_bar(text)
-            bar.setStyle(TableStyle([
-                ("BACKGROUND",    (0, 0), (0, 0), ACCENT),
-                ("VALIGN",        (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING",   (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
-                ("TOPPADDING",    (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]))
-            story.append(bar)
-            continue
-
-        if line.startswith("## "):
-            text = line[3:].strip()
-            bar = _section_bar(text)
-            bar.setStyle(TableStyle([
-                ("BACKGROUND",    (0, 0), (0, 0), ACCENT),
-                ("VALIGN",        (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING",   (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
-                ("TOPPADDING",    (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]))
-            story.append(bar)
-            continue
-
-        # Italic tagline  *text* (standalone line)
-        tagline_match = re.fullmatch(r"\*([^*].+?[^*])\*", line)
-        if tagline_match:
-            box = _tagline_box(tagline_match.group(1))
-            box.setStyle(TableStyle([
-                ("BACKGROUND",    (0, 0), (-1, -1), LIGHT_BG),
-                ("LEFTPADDING",   (0, 0), (-1, -1), 12),
-                ("RIGHTPADDING",  (0, 0), (-1, -1), 12),
-                ("TOPPADDING",    (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-                ("LINEBELOW",     (0, 0), (-1, -1), 1.5, ACCENT),
-            ]))
-            story.append(box)
-            story.append(Spacer(1, 6))
-            continue
-
-        # Bullet  (•, -, *)
-        if re.match(r"^[•\-\*]\s+", line):
-            bullet_text = re.sub(r"^[•\-\*]\s+", "", line)
-            story.append(Paragraph(
-                _inline(bullet_text),
-                BULLET,
-                bulletText="•",
-            ))
-            continue
-
-        # Table row  | … | … | — skip (not supported in business brief)
-        if line.startswith("|") and line.endswith("|"):
-            continue
-
-        # Default: body paragraph
-        story.append(Paragraph(_inline(line), BODY))
-
-    # ── Footer ───────────────────────────────────────────────────
-    story.append(Spacer(1, 14))
-    story.append(_rule(thickness=0.8, color=ACCENT))
-    story.append(Paragraph(
-        f"PluginHive · Shopify Australia Post Shipping App · "
-        f"{_dt.date.today().strftime('%B %d, %Y')}",
-        FOOTER,
-    ))
-
-    doc.build(story)
-    return buf.getvalue()
-
-
-def _escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
+    meta_txt = (
+        f"Generated {_dt.datetime.now().strftime('%B %Y')}     ·     "
+        f"PluginHive QA Team"
     )
+    meta_tbl = Table([[Paragraph(meta_txt, hdr_meta)]], colWidths=[CW])
+    meta_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), C_NAVY_META),
+        ("TOPPADDING",    (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 22),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 22),
+    ]))
 
+    story += [hdr_border, hdr_tbl, meta_tbl, Spacer(1, 0.25 * inch)]
 
-def _format_inline_md(text: str) -> str:
-    escaped = _escape(text)
-    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-    escaped = re.sub(r"\*(.+?)\*",     r"<i>\1</i>",  escaped)
-    escaped = re.sub(r"`(.+?)`",       r"<font name='Courier'>\1</font>", escaped)
-    return escaped
+    # ── Styles for tables and checkboxes ────────────────────────────────────
+    tbl_hdr  = _ps("TblHdr",  fontName=f"{SANS}-Bold", fontSize=9,   leading=12,
+                               textColor=C_WHITE)
+    tbl_cell = _ps("TblCell", fontName=SANS,            fontSize=9,   leading=13,
+                               textColor=C_TEXT)
+    tbl_cell_sm = _ps("TblSm", fontName=SANS,           fontSize=8.5, leading=12,
+                               textColor=C_TEXT)
+    chk_sty  = _ps("Chk",     fontName=SANS,            fontSize=10.5, leading=16,
+                               textColor=C_TEXT, spaceAfter=3, leftIndent=16)
+    node_sty = _ps("NodeCallout", fontName=f"{SANS}-Bold", fontSize=10, leading=14,
+                               textColor=HexColor("#1e3a8a"), spaceAfter=0)
+    code_sty = _ps("Code",    fontName="Courier",        fontSize=8.5, leading=12,
+                               textColor=C_TEXT)
+    note_sty = _ps("Note",    fontName=SANS,             fontSize=10,  leading=14,
+                               textColor=C_TEXT)
+
+    def _code_block(code_lines: list[str]):
+        """Fenced ``` block → monospace box."""
+        body = "<br/>".join(
+            (ln.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+               .replace(" ", "&nbsp;")) or "&nbsp;"
+            for ln in code_lines
+        )
+        tbl = Table([[Paragraph(body, code_sty)]], colWidths=[CW])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), HexColor("#f1f5f9")),
+            ("BOX",           (0, 0), (-1, -1), 0.5, C_BORDER),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+            ("TOPPADDING",    (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        return tbl
+
+    def _callout(quote_lines: list[str]):
+        """Blockquote → note box; gold tint when it reads as a warning/QA note."""
+        joined = " ".join(quote_lines).lower()
+        warn = any(kw in joined for kw in ("warning", "caution", "qa note", "confirm"))
+        body = "<br/>".join(_md_to_rl(ln) if ln.strip() else "&nbsp;" for ln in quote_lines)
+        tbl = Table([[Paragraph(body, note_sty)]], colWidths=[CW])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), HexColor("#fefce8") if warn else HexColor("#f1f5f9")),
+            ("LINEBEFORE",    (0, 0), (0, -1),  3, C_GOLD if warn else C_ACCENT),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 12),
+            ("TOPPADDING",    (0, 0), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ]))
+        return tbl
+
+    def _flush_table(raw_rows: list[str]) -> None:
+        """Parse buffered markdown table lines and append a styled ReportLab Table."""
+        parsed: list[list[str]] = []
+        for r in raw_rows:
+            if re.match(r"^\|[-| :]+\|$", r.strip()):
+                continue  # separator row
+            cells = [c.strip() for c in r.strip().strip("|").split("|")]
+            parsed.append(cells)
+        if not parsed:
+            return
+        n_cols = max(len(r) for r in parsed)
+        # Normalise column count
+        parsed = [r + [""] * (n_cols - len(r)) for r in parsed]
+        # Auto column widths: first col narrower, last col narrower for status cols
+        if n_cols == 3:
+            col_ws = [0.06 * CW, 0.56 * CW, 0.38 * CW]
+        elif n_cols == 2:
+            col_ws = [0.32 * CW, 0.68 * CW]
+        else:
+            unit = CW / n_cols
+            col_ws = [unit] * n_cols
+        # Build cell paragraphs
+        tbl_data: list[list] = []
+        for ri, row in enumerate(parsed):
+            style = tbl_hdr if ri == 0 else tbl_cell_sm
+            tbl_data.append([Paragraph(_md_to_rl(cell), style) for cell in row])
+        rl_tbl = Table(tbl_data, colWidths=col_ws, repeatRows=1)
+        ts = TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0),   C_NAVY),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),   C_WHITE),
+            ("FONTNAME",      (0, 0), (-1, 0),   f"{SANS}-Bold"),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1),  [C_WHITE, HexColor("#f1f5f9")]),
+            ("GRID",          (0, 0), (-1, -1),  0.4, C_BORDER),
+            ("TOPPADDING",    (0, 0), (-1, -1),  5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1),  5),
+            ("LEFTPADDING",   (0, 0), (-1, -1),  7),
+            ("RIGHTPADDING",  (0, 0), (-1, -1),  7),
+            ("VALIGN",        (0, 0), (-1, -1),  "TOP"),
+        ])
+        rl_tbl.setStyle(ts)
+        story.append(rl_tbl)
+        story.append(Spacer(1, 0.1 * inch))
+
+    # ── Render content (with table buffering) ────────────────────────────────
+    table_buf: list[str] = []
+    seen_card_marker = False
+    seen_page_h1 = False
+
+    def _maybe_flush():
+        if table_buf:
+            _flush_table(list(table_buf))
+            table_buf.clear()
+
+    idx = 0
+    while idx < len(content_lines):
+        line = content_lines[idx]
+        idx += 1
+        clean = line.strip()
+
+        # Fenced code block
+        if clean.startswith("```"):
+            _maybe_flush()
+            code_lines: list[str] = []
+            while idx < len(content_lines) and not content_lines[idx].strip().startswith("```"):
+                code_lines.append(content_lines[idx])
+                idx += 1
+            idx += 1  # closing fence
+            if code_lines:
+                story.append(_code_block(code_lines))
+                story.append(Spacer(1, 0.08 * inch))
+            continue
+
+        # Blockquote / callout block
+        if clean.startswith(">"):
+            _maybe_flush()
+            quote_lines = [re.sub(r"^>\s?", "", clean)]
+            while idx < len(content_lines) and content_lines[idx].strip().startswith(">"):
+                quote_lines.append(re.sub(r"^>\s?", "", content_lines[idx].strip()))
+                idx += 1
+            story.append(_callout(quote_lines))
+            story.append(Spacer(1, 0.08 * inch))
+            continue
+
+        # Table row detection
+        if clean.startswith("|"):
+            table_buf.append(clean)
+            continue
+        else:
+            _maybe_flush()
+
+        if not clean:
+            story.append(Spacer(1, 0.05 * inch))
+            continue
+        if re.fullmatch(r"(-{3,}|\*{3,}|_{3,})", clean):
+            story.append(HRFlowable(width=CW, thickness=0.5, color=C_BORDER,
+                                    spaceBefore=4, spaceAfter=6))
+            continue
+        if re.match(r"^CARD\s+\d+/\d+$", clean, flags=re.IGNORECASE):
+            if seen_card_marker:
+                story.append(PageBreak())
+            seen_card_marker = True
+            story.append(Paragraph(_md_to_rl(clean), body_style))
+            continue
+        if clean.startswith("# ") and not clean.startswith("## "):
+            # A later H1 starts a new document section — give it its own page.
+            if seen_page_h1:
+                story.append(PageBreak())
+            seen_page_h1 = True
+            story.extend(_h2_row(clean[2:].strip()))
+        elif clean.startswith("## "):
+            story.extend(_h2_row(clean[3:].strip()))
+        elif clean.startswith("### "):
+            story.append(Paragraph(_md_to_rl(clean[4:].strip()), h3_style))
+        elif re.match(r"^- \[[ xX]\]", clean):
+            # Checkbox bullet: - [ ] or - [x]
+            checked = bool(re.match(r"^- \[[xX]\]", clean))
+            raw_text = re.sub(r"^- \[[ xX]\]\s*", "", clean)
+            # Strip any leftover ** / * that _md_to_rl couldn't pair-match
+            raw_text = re.sub(r"\*+", "", raw_text)
+            text = _md_to_rl(raw_text)
+            if checked:
+                icon = f'<font color="#16a34a" fontName="{SANS}-Bold" fontSize="13">✓</font>'
+            else:
+                icon = f'<font color="#1d4ed8" fontName="{SANS}-Bold" fontSize="11">✦</font>'
+            story.append(Paragraph(f"{icon}  {text}", chk_sty))
+        elif is_request_log_callout(clean):
+            text = re.sub(r"^[-*]\s*", "", clean).strip()
+            node_tbl = Table([[Paragraph(_md_to_rl(text), node_sty)]], colWidths=[CW])
+            node_tbl.setStyle(TableStyle([
+                ("BACKGROUND",    (0, 0), (-1, -1), HexColor("#dbeafe")),
+                ("BOX",           (0, 0), (-1, -1), 0.7, HexColor("#2563eb")),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+                ("TOPPADDING",    (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ]))
+            story.append(node_tbl)
+            story.append(Spacer(1, 0.08 * inch))
+        elif clean.startswith("- ") or clean.startswith("* "):
+            text = _md_to_rl(clean[2:].strip())
+            story.append(Paragraph(
+                f'<font color="#c9922a" fontName="{SANS}-Bold">›</font>  {text}', bullet_sty,
+            ))
+        elif re.match(r"^\d+\.\s+", clean):
+            m = re.match(r"^(\d+)\.\s+(.*)", clean)
+            if m:
+                n, cnt = m.group(1), _md_to_rl(m.group(2))
+                story.append(Paragraph(
+                    f'<font color="#1d4ed8" fontName="{SANS}-Bold">{n}.</font>  {cnt}', num_style,
+                ))
+        elif clean.startswith('"') or clean.startswith('\u201c'):
+            q_tbl = Table([[Paragraph(_md_to_rl(clean), quote_sty)]], colWidths=[CW])
+            q_tbl.setStyle(TableStyle([
+                ("BACKGROUND",   (0, 0), (-1, -1), HexColor("#fefce8")),
+                ("LINEAFTER",    (0, 0), (0, -1),  3, C_GOLD),
+                ("LINEBEFORE",   (0, 0), (0, -1),  3, C_GOLD),
+                ("TOPPADDING",   (0, 0), (-1, -1), 10),
+                ("BOTTOMPADDING",(0, 0), (-1, -1), 10),
+                ("LEFTPADDING",  (0, 0), (-1, -1), 14),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+            ]))
+            story.append(q_tbl)
+            story.append(Spacer(1, 0.06 * inch))
+        else:
+            story.append(Paragraph(_md_to_rl(clean), body_style))
+
+    _maybe_flush()
+    story.append(Spacer(1, 0.3 * inch))
+    doc_obj.build(story, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
+    return buf.getvalue()

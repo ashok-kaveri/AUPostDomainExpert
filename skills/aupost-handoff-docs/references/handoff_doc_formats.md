@@ -276,8 +276,8 @@ Tabs: Packages | Return packages
 
 ---
 
-## Feature Summary
-<1-2 paragraphs describing what changed — plain English>
+## Brief Description
+<Very crisp. 1 short paragraph describing what changed — plain English>
 
 ## Account Type Coverage
 - **eParcel**: <what applies, or "Not affected">
@@ -307,22 +307,36 @@ Example:
 - <Status badge text, e.g. "label generated" (green)>
 - <JSON field value if verifiable>
 - <UI change visible to merchant>
-
-## Business-Safe Explanation
-<Plain English — what a merchant would notice. No technical terms.>
-
-## Q&A
-**Q: <common support question>**
-A: <answer>
-
-## Known Limitations
-- eParcel: <any limits, e.g. "Dangerous Goods: domestic only">
-- MyPost Business: <limits, e.g. "Domestic only. Extra Cover max $1,000. No Dangerous Goods.">
-
-## References
-- [Trello card](<url>)
-- [PluginHive AU Post docs](https://www.pluginhive.com/knowledge-base/australia-post-shopify-shipping-app-rates-label-tracking/)
 ```
+
+Do not add `Business-Safe Explanation`, `Merchant-Safe Explanation`, `Q&A` / `Common Questions & Troubleshooting`, `Support Escalation Packet`, `Known Limitations` / `Rollout Notes`, or `References`. The document ends after `Expected Behaviour`.
+
+Account-type limits (eParcel vs MyPost Business) still belong in `Account Type Coverage`, not in a separate limitations section.
+
+---
+
+## Multi-Card Release Package Format
+
+```markdown
+# <Release> Support Guide
+
+## Included Story Cards
+| Story ID | Story Title | Toggle Name |
+|---|---|---|
+
+## <Story ID> - <Card title>
+### Brief Description
+...
+```
+
+Index page rules:
+
+- use exactly three columns: `Story ID`, `Story Title`, `Toggle Name`
+- `Story ID` is the story/card number only
+- `Story Title` is the card title
+- `Toggle Name` is the exact toggle name, or `None` when the card needs no toggle
+
+Do not add a `How Support Should Use This Package` section. The index page is followed directly by the first card section.
 
 ---
 
@@ -334,7 +348,7 @@ A: <answer>
 
 ---
 
-### The Problem
+### Brief Description
 2–3 sentences on what frustration or inefficiency existed before this change.
 
 ---
@@ -376,7 +390,7 @@ If no setup needed: "Available automatically — no setup required."
 
 ## Tone Guide
 
-**Support Guide**: Professional, practical, support-ready. Clear paths, what to observe, what to tell the merchant, what to check if the feature fails.
+**Support Guide**: Professional, practical, support-ready. Clear paths and what to observe.
 
 **Business Brief**: Plain English, merchant-friendly. Someone who has never opened the app should understand it in under 2 minutes.
 
