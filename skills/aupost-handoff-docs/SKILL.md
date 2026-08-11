@@ -1,63 +1,209 @@
 ---
 name: aupost-handoff-docs
-description: Use when working inside the AUPostDomainExpert project after cards are approved and the user wants professional release handoff documents: Support Guide, Business Brief, or both. Generated from approved US/AC, TCs, AI QA evidence, release/card metadata, and member ownership. Covers both eParcel and MyPost Business where relevant.
+description: Use when working inside the AUPostDomainExpert project after cards are approved and the user wants professional release handoff documents like the dashboard Handoff Docs tab: Support Guide, Business Brief, or both, generated from approved US/AC, TCs, AI QA evidence, release/card metadata, toggles, and member ownership. Covers both eParcel and MyPost Business. If the user requests only one document, generate only that document and PDF.
 ---
 
 # AU Post Handoff Docs
 
-Use this skill to generate professional release handoff documents for AU Post Shopify app cards.
+Use this skill to generate professional handoff documents for approved PluginHive Australia Post Shopify app release cards.
 
-## First Reads (REQUIRED — do not skip)
+It mirrors the dashboard `Handoff Docs` tab:
 
-1. Read the handoff doc formats reference — it contains the complete app navigation map, exact button names, step-by-step templates, and document formats:
-   `/Users/madan/Documents/AU_Post_DomainExpert/AUPostDomainExpert/skills/aupost-handoff-docs/references/handoff_doc_formats.md`
-2. Use `aupost-trello-operator` to fetch approved card content (US/AC, TCs, comments) if a card ID/URL is provided.
+- Combined release Support Guide
+- Combined release Business Brief
+- Optional single-card Support Guide / Business Brief for quick review
+- Markdown + PDF output
+- Trello/Slack-ready artifacts when requested
 
-**CRITICAL RULE**: For the "Where to Find" and "Walkthrough" sections, use ONLY the exact routes, button names, and step sequences from the `APP NAVIGATION MAP` and `NAVIGATION STEP TEMPLATES` in the reference file. Do NOT infer navigation paths from AC text — the AC rarely describes exact UI paths.
+Default release delivery is one combined PDF per document type. If the user asks for only one document type, generate only that combined document. Use single-card documents only when the user explicitly asks for one card.
+
+## First Reads
+
+Before generating:
+
+1. Read `AGENTS.md`.
+2. Read:
+   - `skills/aupost-handoff-docs/references/handoff_doc_formats.md`
+3. Inspect only directly relevant project files:
+   - `pipeline/handoff_docs.py`
+   - `ui/pipeline_dashboard.py`
+
+Use `aupost-domain-core` research when local context is incomplete or customer-facing explanations need current AU Post/PluginHive/Shopify facts.
+Use `aupost-trello-operator` to fetch card details/members or attach/comment PDFs when explicitly requested.
+Use `aupost-slack-operator` to send PDFs or messages to Slack when explicitly requested.
+
+**CRITICAL RULE**: walkthrough navigation comes from the `APP NAVIGATION MAP` and `NAVIGATION STEP TEMPLATES` in the reference file, from AI QA evidence, or from the frontend/backend code — never from AC text. The AC rarely describes exact UI steps. A wrong walkthrough is worse than an honest unknown with a clear question.
+
+For release packages, always use full live Trello card context when available: description, comments, labels, attachments/checklist summaries, approved AC/TCs, and AI QA evidence. QA comments often contain late caveats and must not be skipped.
+
+## Excluded Cards
+
+Before anything else, drop cards that are not part of the release story set. Exclude any card carrying one of these labels:
+
+- `SL: ON Hold`
+- `SL: Carrier Platform`
+- `Spill Over`
+- `SL: Closed By Support`
+
+Rules:
+
+- Match labels case-insensitively and tolerate emoji, colour prefixes, and extra spacing around the name.
+- Match on the card's Trello **labels**, not on its title. An `SL:` prefix inside a card title is a story id and never triggers an exclusion.
+- Exclude the card from the index table as well as the body. A card left out of the body but listed in the index reads as a missing section.
+- Include an excluded card only when the user names it or explicitly asks for it. Naming the card is the instruction — do not ask again.
+- Never drop the card silently. Always report which cards were excluded and which label triggered it, so a short release is visibly deliberate.
+- Excluded cards contribute no toggles to the `Toggle List Follow-Up` DM.
+
+Before writing any release package, do a toggle audit for every card:
+
+- Search the whole card for the toggle, not just the description: comments, checklists, attachments, approved AC, TCs, and QA evidence. The exact toggle key is often only in a QA or developer comment.
+- Put the exact key in the index table `Toggle Name` column. List every key comma-separated when a card has more than one, and `None` when the card needs no toggle.
+- Never guess or reconstruct a toggle key. If the card clearly needs one but no key is stated anywhere, write `Not stated` and flag it in the final response.
+- `detect_toggles` in this repo has not received the markdown-bold-key hardening that MCSL and FedEx got, so a toggle written as `**key**` in card text can be missed. When card evidence clearly names a toggle that the helper did not return, use the card evidence and say so.
+
+Before writing a release Support Guide, do a payload/log audit for every card:
+
+- If the evidence asks support to inspect a carrier request, response, payload, rates log, createShipment request/response JSON, tracking payload, or report source field, include the exact node/field name support must verify.
+- AU Post request fields are documented in the reference file, for example `options.extra_cover.amount`, `options.authority_to_leave`, or `items[0].product_id`. Use the exact path.
+- Put the callout immediately after the relevant walkthrough step, using one of these exact bullet labels so the PDF renderer highlights it:
+  - `Request node to verify: ...`
+  - `Request nodes to verify: ...`
+  - `Request/response nodes to verify: ...`
+  - `Request/log fields to verify: ...`
+- Say where the payload comes from when it is not obvious: the rates log dialog during the label flow, or `More Actions -> Download Documents` / `More Actions -> How To -> Click Here` after the label exists.
+- Do not add node callouts to UI-only, report-only, sync-only, or performance cards unless card evidence names an actual request/log field.
+- If the exact field is unknown after checking card comments/checklists and code/context, say what log to inspect in troubleshooting and do not invent a node name.
+
+Before writing Support Guide or Business Brief content, do a technical-card audit for every card:
+
+- A technical card is one only a developer cares about: an API-only change, a library or version upgrade, a refactor, an internal clean-up, or infrastructure work with nothing support or the merchant can see or do.
+- Move every technical card into a single `## Technical Cards` section placed after the last normal card section. Keep each entry to a few lines: what changed and why it matters.
+- Keep technical cards in their normal position in the index table — only the body section moves.
+- If a card has both a technical part and something support can see or demo, keep it as a normal card.
+
+Before writing Support Guide or Business Brief content, do an account-type audit for every card:
+
+- Every card runs on Shopify — the axis that varies here is the AU Post account type. Decide, per card, whether it applies to eParcel, MyPost Business, or both, and say so explicitly. This is the AU Post equivalent of a platform audit and is never optional.
+- Detect the account type from the title, labels, description, comments, linked ticket, PR notes, AC, TCs, and QA evidence. If the card names neither account type and the behaviour is shared, say "Both account types".
+- These limits are always stated correctly, never approximated:
+  - Extra Cover (Insurance): eParcel max **$5,000 AUD**, MyPost Business max **$1,000 AUD**
+  - International shipping: **eParcel only** — MyPost Business is domestic only
+  - Dangerous Goods: **eParcel domestic only** — not MyPost Business, not international
+- Account-type limits belong in the card's `Account Type Coverage`, not in a separate limitations section.
+
+## Inputs
+
+Best input package:
+
+- card name/id/url
+- release name
+- approved US + AC
+- reviewed TCs
+- AI QA summary/evidence
+- support sign-off notes
+- developed by / tested by
+- account type(s) covered
+- toggles/prerequisites
+- known limitations
+- rollout notes
+
+If some inputs are missing, still generate a useful draft, but mark unknown fields clearly. Do not invent ownership, release numbers, toggles, account-type coverage, or unsupported limitations.
 
 ## Document Selection
 
 Generate based on user request:
-- "support guide", "support doc", "demo doc" → Support Guide only
-- "business brief", "business doc", "stakeholder doc" → Business Brief only
-- "handoff docs", "both docs" → both documents
-- If unclear, ask: Support Guide, Business Brief, or both?
 
-## Document Types
+- "support guide", "support doc", "demo doc", "customer support explanation" -> combined release Support Guide only
+- "business brief", "business doc", "stakeholder doc", "marketing/sales summary" -> combined release Business Brief only
+- "handoff docs", "both docs", "support and business" -> both combined release PDFs
+- "single card", "only this card", or a specific card id/name -> single-card document for that card
 
-| Document | Audience | When To Generate |
-|---|---|---|
-| Support Guide | Support team, demo team, PluginHive internal | After card approved + QA signed off |
-| Business Brief | Non-technical stakeholders, business owners | When requested |
-| Both | All stakeholders | When user asks for full package |
+If unclear, ask which one: Support Guide, Business Brief, or both.
 
-## Input Needed
+## Support Guide Purpose
 
-- Approved card(s): title, description, US/AC comment, TC comment, AI QA evidence
-- Account type(s) covered: eParcel / MyPost Business / Both
-- Release version/name (from Trello list name or card)
-- Developer name(s) and QA name(s) from card members
-- AI QA verdict summary
+The Support Guide is for support/demo teams who need to understand the feature well enough to explain it to customers.
 
-If some inputs are missing, generate a useful draft but mark unknown fields clearly. Do not invent ownership, release numbers, or unsupported limitations.
+It must be practical, professional, and support-friendly and very crisp and do not use any Technical jargon.
 
-## Support Guide Sections
+Use no technical words anywhere in the body of either document: no code, class, file, or method names, no API or schema jargon, and no internal engineering terms. Write it the way you would explain the feature to someone who has never seen the code. Three places are exempt, because the exact string is the point: the request/log callouts described above, the `Technical Cards` section, and toggle keys in the index table and `Toggles & Prerequisites` tables.
 
-1. **Release Details** — Feature Reference, Trello card URL, Release, Approved, Developed by, Tested by
-2. **Brief Description** — What changed / what was added (plain English, very crisp)
-3. **Account Type Coverage** — eParcel / MyPost Business / Both — always be explicit
-4. **Toggles & Prerequisites** — whether any toggle is needed; "None required" if not
-5. **Where to Find** — exact app path from the navigation map in the reference file
-6. **Walkthrough** — step-by-step guide using exact button/link names from the reference file
-7. **Expected Behaviour** — what support should observe (status badge, JSON field, UI change)
+- Include the Index Page with exactly these columns: "Story ID", "Story Title", "Toggle Name", "Trello card link"
+- Explain "Brief Feature Summary" in a title called "Brief Description" Keep it very crisp
+- state the account type coverage on every card
+- include where support can see it inside the relevant walkthrough steps
+- explain what the merchant should experience
+- include walkthrough steps built from the exact button and link names in the navigation map
+- include toggles/prerequisites
 
-Do not add `Business-Safe Explanation`, `Merchant-Safe Explanation`, `Q&A` / `Common Questions & Troubleshooting`, `Support Escalation Packet`, `Known Limitations` / `Rollout Notes`, or `References` sections. The document ends after `Expected Behaviour`.
+Do not write vague release notes. This should be a real support enablement document.
 
-Account-type limits (eParcel vs MyPost Business) still belong in `Account Type Coverage`, not in a separate limitations section.
+## PDF Generation
 
-## Multi-Card Release Package Structure
+When the user asks for PDF:
 
-When the user asks for a combined release package, start with the index page and go straight into the card sections:
+1. Generate the markdown first.
+2. Save the markdown under `data/handoff_docs/`.
+3. Render PDF using:
+   `skills/aupost-handoff-docs/scripts/render_handoff_pdf.py`
+
+For one requested release document, create one combined PDF containing all selected/approved release cards.
+
+For both, create two combined PDFs: one Support Guide package and one Business Brief package.
+
+## Slack Delivery
+
+Send with `scripts/send_handoff_pdf_to_slack.py`. Nothing is sent without `--yes`, so always dry-run first and show the resolved target.
+
+```bash
+# dry run — prints target, filename, size, message text
+python3 scripts/send_handoff_pdf_to_slack.py --pdf <pdf path> --title "<doc title>"
+
+# DM to the doc owner (default target)
+python3 scripts/send_handoff_pdf_to_slack.py --pdf <pdf path> --title "<doc title>" --yes
+
+# team channel: bare --channel targets qa_members_internal
+python3 scripts/send_handoff_pdf_to_slack.py --pdf <pdf path> --title "<doc title>" --channel --yes
+```
+
+**When the request already names a destination, that is the approval — do not ask again.**
+"DM me the PDF", "send it to me", "share it in #qa-team" all authorise that one send: dry-run,
+then send in the same turn, then report the target and file id. Re-sending a corrected version
+of a document the user already asked to be sent needs no fresh approval either.
+
+Ask first only when:
+
+- the user asked for a document but named no destination, or
+- the send target differs from the one they named — in particular, approval for a DM is never
+  approval for a team channel, and vice versa.
+
+Always report the outcome: target, file id on success, or the exact Slack error on failure.
+
+## Toggle List Follow-Up
+
+After a release package is generated, send the consolidated toggle list as a Slack DM to `ashok@pluginhive.com`. This is a standing instruction from the doc owner, so it needs no fresh approval — but always show the message text before sending, then report the result.
+
+Rules:
+
+- Send the toggle list only. Never attach the document to this message; document delivery stays under `Slack Delivery` above.
+- Skip the step entirely when no card in the release has a toggle. Say so in the final response instead of sending an empty message.
+- Build the list with `aupost-toggle-enable-list`, reusing the `Toggle Name` column of the guide's index table as the source. One line per toggle, in this exact shape:
+
+```
+"<shop domain>.<toggle name>": true,
+```
+
+- AU Post toggles follow the FedEx convention: keyed by the merchant's Shopify store domain, including the `.myshopify.com` suffix.
+- Shape example: `"<qa-store>.myshopify.com.aupost.extra.cover.enabled": true,`
+- Use the shop domain the release was tested against, taken from the card evidence or from the request. There is no hardcoded default QA store for AU Post — if no shop domain is stated anywhere, ask which store rather than guessing one.
+- When the release covers more than one shop, send one fenced block per shop, each with a line naming the store it is for.
+- If a card names a toggle with no shop prefix at all, do not bolt a domain onto it — list it separately with the note that it is applied against the named shop directly, exactly as `aupost-toggle-enable-list` specifies.
+- Use `aupost-slack-operator` for the DM, since this is a text message rather than a file upload.
+- Carry over the `aupost-toggle-enable-list` guardrails: never invent a toggle, never repair a malformed shop domain, and list anything left out with a one-line reason.
+
+## Combined Release Package Structure
+
+Combined Support Guide:
 
 ```markdown
 # <Release> Support Guide
@@ -69,60 +215,104 @@ When the user asks for a combined release package, start with the index page and
 ## <Story ID> - <Card title>
 ### Brief Description
 ...
+
+## Technical Cards
+### <Story ID> - <Card title>
+...
 ```
-
-Index page rules:
-
-- use exactly four columns: `Story ID`, `Story Title`, `Toggle Name`, `Trello card link`
-- `Story ID` is the story/card number only
-- `Story Title` is the card title
-- `Toggle Name` is the exact toggle name, or `None` when the card needs no toggle
-- `Trello card link` is a markdown link to the card, labelled with the story id, for example `[941](https://trello.com/c/abc123)`; use `-` when no card URL is known
 
 Do not add a `How Support Should Use This Package` section. The index page is followed directly by the first card section.
 
-Every story card section starts on a new PDF page, including the first — the index page stands alone. `render_pdf_bytes` inserts the page breaks automatically, so do not hand-place page breaks or filler.
+Combined Business Brief:
 
-## Business Brief Sections
+```markdown
+# What's New: <Release>
 
-1. **Feature Headline** — one-line feature name
-2. **Brief Description** — 2-3 sentences on what was broken/missing
-3. **What's New** — 3-5 bullet points (action verbs, no jargon)
-4. **Who Benefits** — 2-3 merchant scenarios
-5. **Why It Matters** — 2-3 sentences on business value
-6. **Availability** — which account type + whether setup is needed
+## Release Overview
+...
 
-## Business Brief Rules
+## Included Updates
+| Story ID | Story Title | Toggle Name | Trello card link |
+|---|---|---|---|
 
-- Max ~400 words total
-- Plain English only — no API, JSON, iframe, regex, backend, frontend
-- No developer/tester attribution
-- No QA notes, no test counts
-- Highlight eParcel-only vs MyPost Business-only vs both
-- No toggle detail unless merchant must act
+## <Story ID> - <Card title>
+### Brief Description
+...
 
-## Account Type — Key Limits to Always State Correctly
+## Technical Cards
+### <Story ID> - <Card title>
+...
+```
 
-- Extra Cover (Insurance): eParcel max **$5,000 AUD** | MyPost Business max **$1,000 AUD**
-- International shipping: **eParcel only** (MyPost Business is domestic only)
-- Dangerous Goods: **eParcel domestic only** (not MyPost Business, not international)
+## Technical Cards Section
 
-## PDF Rendering
+Layout rules, which follow how `render_pdf_bytes` breaks pages:
 
-When the user asks for PDF:
+- Use one H2 `## Technical Cards` after the last normal card section. Inside a combined package the renderer page-breaks before every non-package H2, so this section gets its own page automatically — never hand-place a break.
+- List each technical card under it as an H3 `### <Story ID> - <Card title>` so the short entries flow together instead of taking a page each.
+- Two to four lines per card: what changed, and why it matters for the product or the merchant. No walkthrough, no toggles section, no expected-behaviour section.
+- Plain wording still applies. Name a version, endpoint, or field only when the entry makes no sense without it.
+- Omit the section entirely when the release has no technical cards.
 
-1. Generate the markdown first.
-2. Save the markdown under `data/handoff_docs/`.
-3. Render PDF using:
-   `skills/aupost-handoff-docs/scripts/render_handoff_pdf.py`
+## Support Guide Structure
 
-This wraps `pipeline.handoff_docs.render_pdf_bytes`, which uses the shared PluginHive handoff styling — the same header panel, palette, tables, and footer as the MCSL and FedEx handoff PDFs.
+For each card section inside the combined Support Guide, follow the sample release support guide style:
+
+```markdown
+# Support Guide: <Story ID or concise feature name>
+
+## Brief Description
+...
+
+## Account Type Coverage
+...
+
+## Toggles & Prerequisites
+...
+
+## Step-by-Step Support Walkthrough
+...
+
+## Expected Behaviour
+...
+```
+
+`Account Type Coverage` is the one section AU Post keeps that the other carrier guides do not — eParcel versus MyPost Business changes what support can promise, so it stays on every card.
+
+Do not add `Release Details`, `Where to Find This in the App`, `Business-Safe Explanation`, `Merchant-Safe Explanation`, `Q&A` / `Common Questions & Troubleshooting`, `Support Escalation Packet`, `Known Limitations / Rollout Notes`, or `References` sections. The card section ends after `Expected Behaviour`, and navigation lives inside the walkthrough steps.
+
+## Quality Bar
+
+Before finalizing:
+
+- make it understandable for support people
+- remove internal/code jargon entirely from the body; the only exceptions are request/log callouts and the `Technical Cards` section
+- verify every card states its account type coverage, and that Extra Cover limits, international-only, and Dangerous Goods scope are correct
+- verify every card's toggle was searched for across comments, checklists, and QA evidence, not just the description
+- verify no card labelled `SL: ON Hold`, `SL: Carrier Platform`, `Spill Over`, or `SL: Closed By Support` slipped into the index table or the body
+- verify technical-only cards sit in the `Technical Cards` section at the end, not mixed into the walkthrough cards
+- verify every navigation step uses an exact label from the navigation map, for example "AU Post Generate Label" and "Au Post Return Label" with their exact casing, and the `/apps/aupost-qa/setting` route in the singular
+- keep merchant-facing wording safe and clear
+- do not expose implementation details that customers do not need
+- verify every claim comes from card/AC/TC/AI QA evidence or researched domain facts
+- verify every live Trello QA comment and checklist has been considered before finalizing a release package
+- do not add a generic `Where to Find This in the App` section; include exact navigation in the relevant walkthrough step instead
+- include highlighted exact request/log node names when the card requires request-payload, response, or rates-log verification, such as `options.extra_cover.amount`, `options.signature_on_delivery`, or `items[0].product_id`
+- every story card starts on a new page, including the first — the index page stands alone and the renderer inserts the breaks, so never hand-place one
+- verify no card heading starts at the bottom of a page without its detail table/content following on the same page
+- keep the support guide thorough enough for a support call
+- keep the business brief short and polished
 
 ## Final Response
 
 Return:
-- Support Guide (markdown)
-- Business Brief (markdown, if requested)
-- PDF export note if requested
-- Which account types are covered
-- Any fields left as "Unknown" due to missing input
+
+- document(s) generated
+- markdown path if saved
+- PDF path if rendered
+- which account types are covered
+- whether the toggle list DM was sent, skipped because no card has a toggle, or failed
+- which cards were excluded and the label that triggered each exclusion
+- any missing inputs or assumptions
+
+Use absolute file paths in final responses.

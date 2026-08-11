@@ -14,7 +14,7 @@ The `ai_qa_evidence` field contains those exact steps — button names, URLs, el
 **Extract the walkthrough from the evidence steps directly.** This is ground truth for any feature, including brand-new ones.
 
 ### 2. Frontend Source Code (for NEW features without AI QA evidence)
-The frontend codebase (`FRONTEND_CODE_PATH=/Users/madan/Documents/shopify-au-post-web-client`) has:
+The frontend codebase (path from the `FRONTEND_CODE_PATH` env var in this project's `.env`) has:
 - Exact button text strings (e.g. `"Generate Label"`, `"Insure package"`)
 - Route paths (e.g. `/apps/aupost-qa/setting`)
 - React component structure showing which screen a feature lives in
@@ -23,7 +23,7 @@ The frontend codebase (`FRONTEND_CODE_PATH=/Users/madan/Documents/shopify-au-pos
 When using from Claude app: read the relevant screen file directly to extract button labels and flow.
 
 ### 3. Backend Source Code (for API / business logic)
-The backend codebase (`BACKEND_CODE_PATH=/Users/madan/Documents/shopify-australia-post-app`) has:
+The backend codebase (path from the `BACKEND_CODE_PATH` env var) has:
 - API endpoint names and routes
 - Feature flag / toggle names
 - Service/option names (e.g. service codes T28, E86J)
@@ -46,9 +46,9 @@ stats = get_index_stats()
 - Tell the user: "The code index is empty/stale. Re-index first, then retry."
 - Re-index command:
   ```bash
-  cd /Users/madan/Documents/AU_Post_DomainExpert/AUPostDomainExpert
   .venv/bin/python -m ingest.run_ingest --sources codebase
   ```
+  (run from this project's root)
 - After re-indexing: retry `_fetch_code_context()` and search again.
 
 **Step B — If still not found after indexing (or index is current but no results):**
@@ -262,22 +262,42 @@ Tabs: Packages | Return packages
 
 ---
 
-## Support Guide Format
+## Support Guide Tone
 
-```markdown
-# AU Post App — Support Guide
-**Feature**: <feature name>
-**Release**: <release version or name>
-**Date**: <date>
-**Trello**: <card URL>
-**Developed by**: <developer names>
-**Tested by**: <QA names>
-**Account Type(s)**: eParcel | MyPost Business | Both
+Professional, practical, support-ready.
+
+Audience:
+
+- support team
+- demo team
+- implementation/support leads
+
+The support reader should be able to explain the feature to a merchant without asking engineering.
+
+Use:
+
+- clear brief description
+- explicit account type coverage
+- concrete paths and steps
+- "what support should observe"
+
+Avoid:
+
+- technical words anywhere in the body — code, class, file, or method names, API or schema jargon, internal engineering terms. Three exemptions: the request/log callouts, the `Technical Cards` section, and toggle keys in the index table and `Toggles & Prerequisites` tables
+- deep code/internal implementation details
+- vague "works correctly" wording
+- unsupported claims
+- excessive QA/test-count language
 
 ---
 
+## Per-Card Support Guide Required Sections
+
+```markdown
+# Support Guide: <Story ID or concise feature name>
+
 ## Brief Description
-<Very crisp. 1 short paragraph describing what changed — plain English>
+Very crisp. 1 short paragraph.
 
 ## Account Type Coverage
 - **eParcel**: <what applies, or "Not affected">
@@ -285,37 +305,27 @@ Tabs: Packages | Return packages
 - If one account type only: state clearly "This feature is available for [eParcel / MyPost Business] accounts only."
 
 ## Toggles & Prerequisites
-<State whether a toggle is required. If none: "No toggle required — available automatically.">
+State whether a feature toggle is required.
+If none: "No toggle required — available automatically."
+List prerequisites and scope.
 
-## Where to Find This in the App
-<Use the exact navigation paths from APP NAVIGATION MAP above>
-Example:
-- Shopify admin → Orders → click order → More Actions → "AU Post Generate Label"
-- AU Post app → Settings → /apps/aupost-qa/setting → [Section Name]
-- AU Post app → Products → /apps/aupost-qa/products → click product row
+## Step-by-Step Support Walkthrough
+Use Scenario A/B/C when useful. Put the exact navigation inside the action step, taken from the
+APP NAVIGATION MAP and NAVIGATION STEP TEMPLATES above — for example Shopify admin Orders,
+More Actions, "AU Post Generate Label", the SideDock options, app sidebar Shipping/Settings/
+Products/PickUp/Rates Log/Manifest, or the Order Summary buttons.
 
-## Step-by-Step Walkthrough (Support / Demo)
-<Use exact button names from NAVIGATION STEP TEMPLATES above>
-### Scenario A — <happy path>
-1. ...
-2. ...
-
-### Scenario B — <edge case or account type variant> (if applicable)
-1. ...
-
-## Expected Behaviour — What Support Should Observe
-- <Status badge text, e.g. "label generated" (green)>
-- <JSON field value if verifiable>
-- <UI change visible to merchant>
+## Expected Behaviour
+Summarize the key signal support should observe: status badge text, downloadable label, UI change.
 ```
 
-Do not add `Business-Safe Explanation`, `Merchant-Safe Explanation`, `Q&A` / `Common Questions & Troubleshooting`, `Support Escalation Packet`, `Known Limitations` / `Rollout Notes`, or `References`. The document ends after `Expected Behaviour`.
+`Account Type Coverage` is the one section AU Post keeps that the other carrier guides do not — eParcel versus MyPost Business changes what support can promise, so it stays on every card. Account-type limits belong there, not in a separate limitations section.
 
-Account-type limits (eParcel vs MyPost Business) still belong in `Account Type Coverage`, not in a separate limitations section.
+Do not add `Release Details`, `Where to Find This in the App`, `Business-Safe Explanation`, `Merchant-Safe Explanation`, `Q&A` / `Common Questions & Troubleshooting`, `Support Escalation Packet`, `Known Limitations` / `Rollout Notes`, or `References`. The card section ends after `Expected Behaviour`, and navigation lives inside the walkthrough steps.
 
 ---
 
-## Multi-Card Release Package Format
+## Combined Support Guide Required Sections
 
 ```markdown
 # <Release> Support Guide
@@ -327,23 +337,68 @@ Account-type limits (eParcel vs MyPost Business) still belong in `Account Type C
 ## <Story ID> - <Card title>
 ### Brief Description
 ...
+
+## Technical Cards
+### <Story ID> - <Card title>
+...
 ```
+
+Do not add a `How Support Should Use This Package` section. The index page is followed directly by the first card section.
 
 Index page rules:
 
 - use exactly four columns: `Story ID`, `Story Title`, `Toggle Name`, `Trello card link`
 - `Story ID` is the story/card number only
 - `Story Title` is the card title
-- `Toggle Name` is the exact toggle name, or `None` when the card needs no toggle
+- `Toggle Name` is the exact toggle name, or `None` when the card needs no toggle. Source it from anywhere in the card evidence — description, comments, checklists, attachments, approved AC, TCs, QA notes — because the exact key is often only in a comment. Comma-separate multiple keys. Never guess a key; write `Not stated` and flag it when a card clearly needs one but names none
+- list technical cards in their normal position here even though their body section moves to the end
 - `Trello card link` is a markdown link to the card, labelled with the story id, for example `[941](https://trello.com/c/abc123)`; use `-` when no card URL is known
-
-Do not add a `How Support Should Use This Package` section. The index page is followed directly by the first card section.
-
-Every story card section starts on a new PDF page, including the first — the index page stands alone. `render_pdf_bytes` inserts the page breaks automatically, so do not hand-place page breaks or filler.
 
 ---
 
-## Business Brief Format
+## Technical Cards Section Structure
+
+```markdown
+## Technical Cards
+
+### <Story ID> - <Card title>
+Two to four lines: what changed, and why it matters.
+```
+
+Rules:
+
+- one `## Technical Cards` H2, placed after the last normal card section, and omitted when the release has no technical cards
+- a technical card is developer-only work — API-only change, library or version upgrade, refactor, internal clean-up, infrastructure — with nothing support or the merchant can see or do
+- a card with both a technical part and a visible part stays a normal card
+- each entry is an H3 so the short entries flow together; the renderer already breaks a page before the `## Technical Cards` H2 itself, so never hand-place a break
+- no walkthrough, toggles, account-coverage, or expected-behaviour subsections inside these entries
+- plain wording still applies; name a version, endpoint, or field only when the entry makes no sense without it
+
+---
+
+## Combined Business Brief Required Structure
+
+```markdown
+# What's New: <Release>
+
+## Release Overview
+2-3 sentences describing the release value.
+
+## Included Updates
+| Story ID | Story Title | Toggle Name | Trello card link |
+|---|---|---|---|
+
+## <Story ID> - <Card title>
+Per-card plain-English business brief.
+
+## Technical Cards
+### <Story ID> - <Card title>
+...
+```
+
+---
+
+## Per-Card Business Brief Format
 
 ```markdown
 # <Feature Name in Plain English>
@@ -399,12 +454,47 @@ If no setup needed: "Available automatically — no setup required."
 
 ---
 
+## Release QA Guardrails
+
+- Build release packages from full live Trello card context when available: description, labels, comments, checklists, approved AC/TCs, and AI QA evidence.
+- Treat QA comments as required review input because late caveats often appear there.
+- Exclude cards labelled `SL: ON Hold`, `SL: Carrier Platform`, `Spill Over`, or `SL: Closed By Support` from both the index table and the body, matching labels case-insensitively. Match on Trello labels, not on title text — an `SL:` prefix in a card title is a story id and never excludes a card. Include an excluded card only when the user names it. Report every exclusion and the label behind it; never drop a card silently.
+- Run a toggle audit per card across the whole card, not only the description. The exact toggle key is often only in a QA or developer comment. Never guess a key. `detect_toggles` in this repo has not received the markdown-bold-key hardening MCSL and FedEx got, so a `**bold**` toggle key can be missed — prefer the card evidence and say when the helper missed one.
+- Run a technical-card audit per card and collect developer-only cards into the trailing `Technical Cards` section.
+- Run an account-type audit per card. eParcel versus MyPost Business is the axis that varies here, and it is never optional. Extra Cover is $5,000 AUD on eParcel and $1,000 AUD on MyPost Business; international is eParcel only; Dangerous Goods is eParcel domestic only.
+- After a release package is generated, send the consolidated toggle list as a Slack DM to `ashok@pluginhive.com` per the `Toggle List Follow-Up` section of `SKILL.md`. AU Post toggle keys follow the FedEx shop-domain convention, `"<shop>.myshopify.com.<flag>": true,`. There is no default QA store here — ask when no shop domain is stated. Skip the DM when no card has a toggle.
+- Do not include a generic `Where to Find This in the App` section. The detailed walkthrough is the source of truth for where support should go.
+- Keep feature-specific paths and carrier-specific steps inside the walkthrough sections.
+- Every story card section starts on a new PDF page, including the first — the index page stands alone. `render_pdf_bytes` inserts a page break before each `<Story ID> - <Title>` heading, so do not add manual page breaks or blank filler.
+- Before final PDF generation, verify no card starts at the bottom of a page without the card detail table/content following on the same page.
+- Run a card-by-card payload/log audit before final PDF generation:
+  - If QA/support must inspect a carrier request, response, payload, rates log, createShipment request/response JSON, tracking payload, or report source field, include the exact node or log field.
+  - Put exact nodes/fields in the walkthrough as a highlighted callout using one of these exact labels: `Request node to verify:`, `Request nodes to verify:`, `Request/response nodes to verify:`, or `Request/log fields to verify:`.
+  - Use the exact AU Post paths from the `Checking Label/Shipment Request` section above.
+  - Say where the payload comes from: the rates log dialog during the label flow, or `More Actions -> Download Documents` / `More Actions -> How To -> Click Here` after the label exists.
+  - Keep those node names out of merchant-safe wording.
+  - Do not invent fields for UI-only, sync-only, report-only, or performance-only cards.
+
+---
+
+## PDF Rendering
+
+Use `pipeline.handoff_docs.render_pdf_bytes` through the skill helper script `scripts/render_handoff_pdf.py`. This gives the shared PluginHive handoff styling — the same header panel, palette, tables, and footer as the MCSL and FedEx handoff PDFs.
+
+For release handoff, render one combined Support Guide PDF and one combined Business Brief PDF. Create individual PDFs only for explicit single-card requests.
+
+---
+
 ## Quality Checklist (before finalising)
 
 - [ ] Navigation paths use exact route names (not guesses) from APP NAVIGATION MAP
-- [ ] Button/link names match EXACT labels from NAVIGATION STEP TEMPLATES
-- [ ] Account type restriction stated clearly (eParcel-only, MyPost Business-only, or both)
+- [ ] Button/link names match EXACT labels from NAVIGATION STEP TEMPLATES, including `/apps/aupost-qa/setting` in the singular and the exact casing of "Au Post Return Label"
+- [ ] Account type restriction stated clearly on every card (eParcel-only, MyPost Business-only, or both)
 - [ ] Extra Cover limits stated correctly ($5,000 eParcel / $1,000 MyPost Business)
+- [ ] Exact request/log node names cited as highlighted callouts where verification is possible
+- [ ] No technical jargon in the body of either document, outside the three exemptions
+- [ ] No card carrying an excluded label reached the index table or the body
+- [ ] Technical-only cards sit in the trailing `Technical Cards` section
+- [ ] Every card's toggle was searched for across comments, checklists, and QA evidence
 - [ ] No invented toggles, limitations, or ownership
 - [ ] Business Brief under 400 words
-- [ ] No technical jargon in Business Brief

@@ -16,6 +16,7 @@ Optional:
     SLACK_MENTION_ON_FAIL — user/group to @mention on failures (e.g. U0123456789 or !here)
 """
 from __future__ import annotations
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -852,3 +853,151 @@ def detect_toggles(
             seen.add(name.lower())
 
     return toggles
+
+
+def send_dm_to_user(user_id: str, text: str) -> dict:
+    """
+    Send a plain Slack DM to any user by their Slack user ID.
+
+    Returns {"ok": True} on success or {"ok": False, "error": str} on failure.
+    """
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return {"ok": False, "error": "SLACK_BOT_TOKEN is not set"}
+    if not user_id:
+        return {"ok": False, "error": "No user_id provided"}
+
+    try:
+        client = SlackClient(token=token, channel="dm-only-placeholder")
+        client.send_dm(user_id, text)
+        return {"ok": True}
+    except Exception as e:
+        logger.warning("send_dm_to_user failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+
+def lookup_slack_user_by_email(email: str) -> tuple[str, str]:
+    """Resolve a Slack user id from an email. Returns (user_id, error)."""
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return "", "SLACK_BOT_TOKEN is not set"
+    if not (email or "").strip():
+        return "", "No email provided"
+    try:
+        resp = requests.get(
+            f"{SLACK_API}/users.lookupByEmail",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"email": email.strip()},
+            timeout=15,
+        ).json()
+        if not resp.get("ok"):
+            return "", resp.get("error", "users.lookupByEmail failed")
+        return resp.get("user", {}).get("id", ""), ""
+    except Exception as exc:
+        return "", str(exc)
+
+
+def upload_file_to_slack_channel(
+    channel_id: str,
+    filename: str,
+    file_bytes: bytes,
+    title: str = "",
+    initial_comment: str = "",
+) -> dict:
+    """
+    Upload a file to a Slack channel.
+
+    Returns {"ok": bool, "file_id": str, "error": str}.
+    """
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return {"ok": False, "file_id": "", "error": "SLACK_BOT_TOKEN is not set"}
+    if not channel_id:
+        return {"ok": False, "file_id": "", "error": "No channel selected"}
+    if not file_bytes:
+        return {"ok": False, "file_id": "", "error": "No file bytes to upload"}
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        # Slack retired files.upload — reserve an upload URL, PUT the bytes, then complete.
+        reserve = requests.get(
+            f"{SLACK_API}/files.getUploadURLExternal",
+            headers=headers,
+            params={"filename": filename, "length": len(file_bytes)},
+            timeout=20,
+        ).json()
+        if not reserve.get("ok"):
+            return {"ok": False, "file_id": "",
+                    "error": f"Slack error: {reserve.get('error', 'getUploadURLExternal failed')}"}
+
+        put = requests.post(
+            reserve["upload_url"], files={"file": (filename, file_bytes)}, timeout=60,
+        )
+        if put.status_code != 200:
+            return {"ok": False, "file_id": "", "error": f"upload POST status {put.status_code}"}
+
+        payload = {
+            "files": json.dumps([{"id": reserve["file_id"], "title": title or filename}]),
+            "channel_id": channel_id,
+        }
+        if initial_comment:
+            payload["initial_comment"] = initial_comment
+        done = requests.post(
+            f"{SLACK_API}/files.completeUploadExternal",
+            headers=headers, data=payload, timeout=20,
+        ).json()
+        if not done.get("ok"):
+            return {"ok": False, "file_id": "",
+                    "error": f"Slack error: {done.get('error', 'completeUploadExternal failed')}"}
+        logger.info("Uploaded file '%s' to Slack channel %s", filename, channel_id)
+        return {"ok": True, "file_id": reserve["file_id"], "error": ""}
+    except Exception as exc:
+        logger.warning("upload_file_to_slack_channel failed: %s", exc)
+        return {"ok": False, "file_id": "", "error": str(exc)}
+
+
+def upload_file_to_slack_user(
+    user_id: str,
+    filename: str,
+    file_bytes: bytes,
+    title: str = "",
+    initial_comment: str = "",
+) -> dict:
+    """
+    Upload a file to a user via Slack DM.
+
+    Returns {"ok": bool, "file_id": str, "channel": str, "error": str}.
+    """
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        return {"ok": False, "file_id": "", "channel": "", "error": "SLACK_BOT_TOKEN is not set"}
+    if not user_id:
+        return {"ok": False, "file_id": "", "channel": "", "error": "No user_id provided"}
+    try:
+        client = SlackClient(token=token, channel="dm-only-placeholder")
+        open_resp = requests.post(
+            f"{SLACK_API}/conversations.open",
+            headers=client._bot_headers(),
+            json={"users": user_id},
+            timeout=15,
+        )
+        open_resp.raise_for_status()
+        open_data = open_resp.json()
+        if not open_data.get("ok"):
+            return {"ok": False, "file_id": "", "channel": "", "error": f"conversations.open: {open_data.get('error')}"}
+        dm_channel = open_data["channel"]["id"]
+        upload_res = upload_file_to_slack_channel(
+            channel_id=dm_channel,
+            filename=filename,
+            file_bytes=file_bytes,
+            title=title,
+            initial_comment=initial_comment,
+        )
+        return {
+            "ok": upload_res["ok"],
+            "file_id": upload_res.get("file_id", ""),
+            "channel": dm_channel,
+            "error": upload_res.get("error", ""),
+        }
+    except Exception as exc:
+        logger.warning("upload_file_to_slack_user failed: %s", exc)
+        return {"ok": False, "file_id": "", "channel": "", "error": str(exc)}
